@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Racket Drift</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hud">
+        <h1>Racket Drift</h1>
+        <div class="hud-stats">
+          <span id="score">Mass: 0.0</span>
+          <span id="best">Best Mass: 0.0</span>
+          <span id="level">Level: 1</span>
+          <span id="balls">Balls: 1</span>
+        </div>
+      </header>
+
+      <section class="stage-wrap">
+        <canvas id="gameCanvas" width="1280" height="720" aria-label="Racket Drift game"></canvas>
+        <div id="tip" class="tip">Move your mouse. Keep balls flying through the poles.</div>
+      </section>
+
+      <footer class="legend">
+        <p>
+          Mouse controls the racket. Move right to tilt right, move left to tilt left.
+          Hit spike tips and balls split.
+        </p>
+      </footer>
+    </main>
+
+    <script src="game.js"></script>
+  </body>
+</html>
