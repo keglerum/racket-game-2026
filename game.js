@@ -65,6 +65,10 @@ const SETTINGS_STORAGE_KEY = "racket-drift-settings-v1";
 const SCOREBOARD_STORAGE_KEY = "racket-drift-scoreboard-v1";
 const API_CONFIG_ENDPOINT = "/api/config";
 const API_SCORES_ENDPOINT = "/api/scores";
+const SCORE_TIME_WEIGHT = 2.5;
+const MIN_BALL_RADIUS = 5;
+const BALL_GROW_DELAY_STEPS = 130;
+const BALL_GROW_RATE = 0.012;
 
 let OBSTACLE_DATABASE = {
   "season-1": { label: "Season 1", seed: 20260416 },
@@ -260,6 +264,7 @@ async function loadRemoteScoreboardIfAvailable() {
       timeSec: Number(row.timeSec || 0),
       obstaclesMove: Boolean(row.obstaclesMove),
       layoutLabel: String(row.layoutLabel || "-"),
+      rankScore: Number(row.rankScore || calculateRankScore(Number(row.mass || 0), Number(row.timeSec || 0))),
       seed: normalizeSeed(row.seed),
       createdAt: Number(row.createdAt || Date.now()),
     }));
@@ -293,6 +298,10 @@ function formatDuration(seconds) {
   return `${seconds.toFixed(1)}s`;
 }
 
+function calculateRankScore(mass, timeSec) {
+  return mass + timeSec * SCORE_TIME_WEIGHT;
+}
+
 function getCurrentObstacleSet() {
   return OBSTACLE_DATABASE[state.settings.obstacleSetId] || OBSTACLE_DATABASE["season-1"];
 }
@@ -324,7 +333,7 @@ function renderScoreboard() {
   }
 
   if (state.scoreboard.length === 0) {
-    scoreboardBodyEl.innerHTML = '<tr><td colspan="5">No runs yet. Finish a run to create score entries.</td></tr>';
+    scoreboardBodyEl.innerHTML = '<tr><td colspan="6">No runs yet. Finish a run to create score entries.</td></tr>';
     return;
   }
 
@@ -332,8 +341,12 @@ function renderScoreboard() {
     .slice(0, 12)
     .map((row, index) => {
       const obstacles = row.obstaclesMove ? "Moving" : "Static";
+      const rankScore = Number.isFinite(row.rankScore)
+        ? row.rankScore
+        : calculateRankScore(Number(row.mass || 0), Number(row.timeSec || 0));
       return `<tr>
         <td>${index + 1}</td>
+        <td>${rankScore.toFixed(1)}</td>
         <td>${Number(row.mass || 0).toFixed(1)}</td>
         <td>${formatDuration(Number(row.timeSec || 0))}</td>
         <td>${obstacles}</td>
@@ -344,9 +357,11 @@ function renderScoreboard() {
 }
 
 function recordRunResult() {
+  const rankScore = calculateRankScore(state.massScore, state.survivalTimeSec);
   const entry = {
     mass: state.massScore,
     timeSec: state.survivalTimeSec,
+    rankScore,
     obstaclesMove: state.settings.obstaclesMove,
     layoutLabel: getRunLayoutLabel(),
     seed: state.poleSeed,
@@ -355,6 +370,15 @@ function recordRunResult() {
 
   state.scoreboard.push(entry);
   state.scoreboard.sort((a, b) => {
+    const rankA = Number.isFinite(a.rankScore)
+      ? a.rankScore
+      : calculateRankScore(Number(a.mass || 0), Number(a.timeSec || 0));
+    const rankB = Number.isFinite(b.rankScore)
+      ? b.rankScore
+      : calculateRankScore(Number(b.mass || 0), Number(b.timeSec || 0));
+    if (rankB !== rankA) {
+      return rankB - rankA;
+    }
     if (b.mass !== a.mass) {
       return b.mass - a.mass;
     }
@@ -551,6 +575,7 @@ function refreshLevelFromMass() {
 function spawnBall(x, y, vx = 0, vy = -2.2, radius = 12, splitCooldown = 10) {
   const hue = Math.floor(randomRange(70, 88));
   const mass = Math.PI * radius * radius * 0.026;
+  const targetRadius = Math.min(12, radius * 1.45);
   state.balls.push({
     x,
     y,
@@ -570,6 +595,9 @@ function spawnBall(x, y, vx = 0, vy = -2.2, radius = 12, splitCooldown = 10) {
     z: 0,
     vz: 0,
     bonkCooldown: 0,
+    growthTimer: 0,
+    targetRadius,
+    minFxCooldown: randomRange(8, 18),
     scoredPoles: new Set(),
   });
 }
@@ -931,6 +959,8 @@ function drawBalls() {
     const renderScale = 1 + ball.z * 0.075;
     const renderRadius = ball.radius * renderScale;
     const renderY = ball.y + ball.z * 0.55;
+    const minPulse = 0.5 + 0.5 * Math.sin(state.time * 0.2 + ball.x * 0.03);
+    const isAtMin = ball.radius <= MIN_BALL_RADIUS + 0.06;
 
     if (state.lowPerfMode) {
       const simpleGlow = ctx.createRadialGradient(
@@ -948,6 +978,14 @@ function drawBalls() {
       ctx.beginPath();
       ctx.arc(ball.x, renderY, renderRadius, 0, Math.PI * 2);
       ctx.fill();
+
+      if (isAtMin) {
+        ctx.strokeStyle = `rgba(170, 255, 227, ${0.28 + minPulse * 0.3})`;
+        ctx.lineWidth = Math.max(0.8, renderRadius * 0.12);
+        ctx.beginPath();
+        ctx.arc(ball.x, renderY, renderRadius * (1.18 + minPulse * 0.08), 0, Math.PI * 2);
+        ctx.stroke();
+      }
 
       const seamTilt = ball.spinAngle + Math.atan2(ball.vy, ball.vx) * 0.1;
       ctx.save();
@@ -1005,6 +1043,14 @@ function drawBalls() {
     ctx.beginPath();
     ctx.arc(ball.x, renderY, renderRadius * 1.25, 0, Math.PI * 2);
     ctx.fill();
+
+    if (isAtMin) {
+      ctx.strokeStyle = `rgba(154, 255, 226, ${0.3 + minPulse * 0.34})`;
+      ctx.lineWidth = Math.max(1, renderRadius * 0.13);
+      ctx.beginPath();
+      ctx.arc(ball.x, renderY, renderRadius * (1.22 + minPulse * 0.12), 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
     ctx.fillStyle = "rgba(250, 255, 214, 0.62)";
     ctx.beginPath();
@@ -1258,14 +1304,21 @@ function resolveCircleRectCollision(ball, left, top, right, bottom, bounce = 0.4
 }
 
 function splitBall(ball) {
-  if (ball.splitCooldown > 0 || ball.radius < 6) {
+  if (ball.splitCooldown > 0) {
+    return;
+  }
+
+  if (ball.radius < 6) {
+    // Tiny balls should still be affected by splitters: remove them on spike hit.
+    ball.alive = false;
+    emitParticles(ball.x, ball.y, 14, ball.hue + 12);
     return;
   }
 
   ball.alive = false;
   emitParticles(ball.x, ball.y, 22, ball.hue + 8);
 
-  const newRadius = Math.max(5, ball.radius * 0.72);
+  const newRadius = Math.max(MIN_BALL_RADIUS, ball.radius * 0.72);
   const speed = Math.hypot(ball.vx, ball.vy) + 0.8;
 
   spawnBall(ball.x - 4, ball.y, -Math.abs(speed * 0.52), -2.5, newRadius, 14);
@@ -1297,6 +1350,7 @@ function updateBalls() {
   state.balls.forEach((ball) => {
     ball.splitCooldown = Math.max(0, ball.splitCooldown - state.stepScale);
     ball.bonkCooldown = Math.max(0, ball.bonkCooldown - state.stepScale);
+    ball.minFxCooldown = Math.max(0, ball.minFxCooldown - state.stepScale);
     ball.prevX = ball.x;
     ball.prevY = ball.y;
 
@@ -1315,6 +1369,24 @@ function updateBalls() {
     ball.trail.push({ x: ball.x, y: ball.y });
     if (ball.trail.length > 8) {
       ball.trail.shift();
+    }
+
+    const hasRoomToGrow = ball.radius < ball.targetRadius - 1e-3;
+    if (hasRoomToGrow) {
+      ball.growthTimer += state.stepScale;
+      if (ball.growthTimer >= BALL_GROW_DELAY_STEPS) {
+        const nextRadius = Math.min(ball.targetRadius, ball.radius + BALL_GROW_RATE * state.stepScale);
+        if (nextRadius !== ball.radius) {
+          ball.radius = nextRadius;
+          ball.area = Math.PI * ball.radius * ball.radius;
+          ball.mass = ball.area * 0.026;
+        }
+      }
+    }
+
+    if (ball.radius <= MIN_BALL_RADIUS + 0.06 && ball.minFxCooldown <= 0) {
+      emitParticles(ball.x, ball.y, 1, 158);
+      ball.minFxCooldown = randomRange(9, 22);
     }
 
     const local = worldToRacketLocal(ball.x, ball.y);
