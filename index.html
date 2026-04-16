@@ -8,7 +8,26 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Manrope:wght@500;700&display=swap" rel="stylesheet" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-    <link rel="stylesheet" href="styles.css" />
+    <script>
+      (() => {
+        const params = new URLSearchParams(window.location.search);
+        let cacheToken = params.get("v");
+
+        if (!cacheToken) {
+          cacheToken = String(Date.now());
+          params.set("v", cacheToken);
+          const nextUrl = `${window.location.pathname}?${params.toString()}${window.location.hash}`;
+          window.history.replaceState(null, "", nextUrl);
+        }
+
+        window.__APP_CACHE_TOKEN__ = cacheToken;
+
+        const css = document.createElement("link");
+        css.rel = "stylesheet";
+        css.href = `styles.css?v=${encodeURIComponent(cacheToken)}`;
+        document.head.appendChild(css);
+      })();
+    </script>
   </head>
   <body>
     <main class="app">
@@ -17,14 +36,65 @@
         <div class="hud-stats">
           <span id="score">Mass: 0.0</span>
           <span id="best">Best Mass: 0.0</span>
+          <span id="time">Time: 0.0s</span>
+          <span id="moveMode">Obstacles: Moving</span>
           <span id="level">Level: 1</span>
           <span id="balls">Balls: 1</span>
+          <button id="settingsBtn" class="hud-btn" type="button" aria-expanded="false" aria-controls="settingsPanel">Settings</button>
         </div>
       </header>
+
+      <section id="settingsPanel" class="settings-panel" aria-label="Game settings" hidden>
+        <h2>Run Settings</h2>
+        <label class="setting-row" for="moveObstaclesToggle">
+          <span>Animate Obstacles</span>
+          <input id="moveObstaclesToggle" type="checkbox" checked />
+        </label>
+        <label class="setting-row" for="layoutModeSelect">
+          <span>Obstacle Layout Mode</span>
+          <select id="layoutModeSelect">
+            <option value="public-fixed">Public Fixed (same for everyone)</option>
+            <option value="dev-random">Development Randomized</option>
+          </select>
+        </label>
+        <label class="setting-row" for="obstacleSetSelect">
+          <span>Public Obstacle Set</span>
+          <select id="obstacleSetSelect">
+            <option value="season-1">Season 1</option>
+            <option value="season-2">Season 2</option>
+          </select>
+        </label>
+        <p id="settingsHint" class="settings-hint"></p>
+        <div class="settings-actions">
+          <button id="applySettingsBtn" class="hud-btn" type="button">Apply & Restart</button>
+          <button id="closeSettingsBtn" class="hud-btn ghost" type="button">Close</button>
+        </div>
+      </section>
 
       <section class="stage-wrap">
         <canvas id="gameCanvas" width="1280" height="720" aria-label="Racket Drift game"></canvas>
         <div id="tip" class="tip">Move your mouse. Keep balls flying through the poles.</div>
+      </section>
+
+      <section class="scoreboard" aria-label="Score board">
+        <div class="scoreboard-head">
+          <h2>Score Board</h2>
+          <span class="scoreboard-sub">Tracks Mass + Time Endured</span>
+        </div>
+        <div class="scoreboard-table-wrap">
+          <table class="scoreboard-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Mass</th>
+                <th>Time</th>
+                <th>Obstacles</th>
+                <th>Layout</th>
+              </tr>
+            </thead>
+            <tbody id="scoreboardBody"></tbody>
+          </table>
+        </div>
       </section>
 
       <footer class="legend">
@@ -34,7 +104,13 @@
         </p>
       </footer>
     </main>
-
-    <script src="game.js"></script>
+    <script>
+      (() => {
+        const script = document.createElement("script");
+        const token = window.__APP_CACHE_TOKEN__ || String(Date.now());
+        script.src = `game.js?v=${encodeURIComponent(token)}`;
+        document.body.appendChild(script);
+      })();
+    </script>
   </body>
 </html>

@@ -46,9 +46,46 @@ canvas.height = 720;
 
 const scoreEl = document.getElementById("score");
 const bestEl = document.getElementById("best");
+const timeEl = document.getElementById("time");
+const moveModeEl = document.getElementById("moveMode");
 const levelEl = document.getElementById("level");
 const ballsEl = document.getElementById("balls");
 const tipEl = document.getElementById("tip");
+const settingsBtn = document.getElementById("settingsBtn");
+const settingsPanel = document.getElementById("settingsPanel");
+const moveObstaclesToggleEl = document.getElementById("moveObstaclesToggle");
+const layoutModeSelectEl = document.getElementById("layoutModeSelect");
+const obstacleSetSelectEl = document.getElementById("obstacleSetSelect");
+const settingsHintEl = document.getElementById("settingsHint");
+const applySettingsBtn = document.getElementById("applySettingsBtn");
+const closeSettingsBtn = document.getElementById("closeSettingsBtn");
+const scoreboardBodyEl = document.getElementById("scoreboardBody");
+
+const SETTINGS_STORAGE_KEY = "racket-drift-settings-v1";
+const SCOREBOARD_STORAGE_KEY = "racket-drift-scoreboard-v1";
+const API_CONFIG_ENDPOINT = "/api/config";
+const API_SCORES_ENDPOINT = "/api/scores";
+
+let OBSTACLE_DATABASE = {
+  "season-1": { label: "Season 1", seed: 20260416 },
+  "season-2": { label: "Season 2", seed: 20260701 },
+};
+
+function hasRemoteApi() {
+  return window.location.protocol === "http:" || window.location.protocol === "https:";
+}
+
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    throw new Error(`Request failed (${response.status})`);
+  }
+  return response.json();
+}
+
+function isDevHost() {
+  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+}
 
 const LEVELS = [
   {
@@ -118,6 +155,222 @@ const LEVELS = [
   },
 ];
 
+function defaultLayoutMode() {
+  const modeFromQuery = urlParams.get("layout");
+  if (modeFromQuery === "public-fixed" || modeFromQuery === "dev-random") {
+    return modeFromQuery;
+  }
+  return isDevHost() ? "dev-random" : "public-fixed";
+}
+
+function loadSettings() {
+  const fallback = {
+    obstaclesMove: true,
+    layoutMode: defaultLayoutMode(),
+    obstacleSetId: "season-1",
+  };
+
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return fallback;
+    }
+    const parsed = JSON.parse(raw);
+    const layoutMode = parsed.layoutMode === "dev-random" ? "dev-random" : "public-fixed";
+    const obstacleSetId = OBSTACLE_DATABASE[parsed.obstacleSetId] ? parsed.obstacleSetId : "season-1";
+    return {
+      obstaclesMove: parsed.obstaclesMove !== false,
+      layoutMode,
+      obstacleSetId,
+    };
+  } catch (_err) {
+    return fallback;
+  }
+}
+
+function saveSettings(settings) {
+  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+}
+
+function loadScoreboard() {
+  try {
+    const raw = localStorage.getItem(SCOREBOARD_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_err) {
+    return [];
+  }
+}
+
+function saveScoreboard(rows) {
+  localStorage.setItem(SCOREBOARD_STORAGE_KEY, JSON.stringify(rows));
+}
+
+async function loadRemoteConfigIfAvailable() {
+  if (!hasRemoteApi()) {
+    return;
+  }
+
+  try {
+    const payload = await fetchJson(API_CONFIG_ENDPOINT);
+    if (!payload || !Array.isArray(payload.obstacleSets)) {
+      return;
+    }
+
+    const nextDatabase = {};
+    payload.obstacleSets.forEach((setRow) => {
+      if (!setRow || !setRow.setId) {
+        return;
+      }
+      nextDatabase[setRow.setId] = {
+        label: String(setRow.label || setRow.setId),
+        seed: normalizeSeed(setRow.seed),
+      };
+    });
+
+    if (Object.keys(nextDatabase).length > 0) {
+      OBSTACLE_DATABASE = nextDatabase;
+      if (!OBSTACLE_DATABASE[state.settings.obstacleSetId]) {
+        const firstSetId = Object.keys(OBSTACLE_DATABASE)[0];
+        state.settings.obstacleSetId = firstSetId;
+      }
+      saveSettings(state.settings);
+    }
+  } catch (_err) {
+    // Keep local defaults when API/config is unavailable.
+  }
+}
+
+async function loadRemoteScoreboardIfAvailable() {
+  if (!hasRemoteApi()) {
+    return;
+  }
+
+  try {
+    const payload = await fetchJson(`${API_SCORES_ENDPOINT}?limit=50`);
+    if (!payload || !Array.isArray(payload.scores)) {
+      return;
+    }
+
+    state.scoreboard = payload.scores.map((row) => ({
+      mass: Number(row.mass || 0),
+      timeSec: Number(row.timeSec || 0),
+      obstaclesMove: Boolean(row.obstaclesMove),
+      layoutLabel: String(row.layoutLabel || "-"),
+      seed: normalizeSeed(row.seed),
+      createdAt: Number(row.createdAt || Date.now()),
+    }));
+    saveScoreboard(state.scoreboard);
+    renderScoreboard();
+  } catch (_err) {
+    // Fall back to local scoreboard only.
+  }
+}
+
+async function submitScoreIfAvailable(entry) {
+  if (!hasRemoteApi()) {
+    return false;
+  }
+
+  try {
+    await fetchJson(API_SCORES_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(entry),
+    });
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function formatDuration(seconds) {
+  return `${seconds.toFixed(1)}s`;
+}
+
+function getCurrentObstacleSet() {
+  return OBSTACLE_DATABASE[state.settings.obstacleSetId] || OBSTACLE_DATABASE["season-1"];
+}
+
+function getRunLayoutLabel() {
+  if (state.settings.layoutMode === "dev-random") {
+    return "Dev Random";
+  }
+  return `${getCurrentObstacleSet().label} (${state.poleSeed})`;
+}
+
+function chooseRunSeed() {
+  const forcedSeed = urlParams.get("seed");
+  if (forcedSeed !== null) {
+    return normalizeSeed(forcedSeed);
+  }
+
+  if (state.settings.layoutMode === "dev-random") {
+    const seed = Math.floor(Math.random() * 4294967296) >>> 0;
+    return seed || 1;
+  }
+
+  return getCurrentObstacleSet().seed;
+}
+
+function renderScoreboard() {
+  if (!scoreboardBodyEl) {
+    return;
+  }
+
+  if (state.scoreboard.length === 0) {
+    scoreboardBodyEl.innerHTML = '<tr><td colspan="5">No runs yet. Finish a run to create score entries.</td></tr>';
+    return;
+  }
+
+  scoreboardBodyEl.innerHTML = state.scoreboard
+    .slice(0, 12)
+    .map((row, index) => {
+      const obstacles = row.obstaclesMove ? "Moving" : "Static";
+      return `<tr>
+        <td>${index + 1}</td>
+        <td>${Number(row.mass || 0).toFixed(1)}</td>
+        <td>${formatDuration(Number(row.timeSec || 0))}</td>
+        <td>${obstacles}</td>
+        <td>${row.layoutLabel || "-"}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function recordRunResult() {
+  const entry = {
+    mass: state.massScore,
+    timeSec: state.survivalTimeSec,
+    obstaclesMove: state.settings.obstaclesMove,
+    layoutLabel: getRunLayoutLabel(),
+    seed: state.poleSeed,
+    createdAt: Date.now(),
+  };
+
+  state.scoreboard.push(entry);
+  state.scoreboard.sort((a, b) => {
+    if (b.mass !== a.mass) {
+      return b.mass - a.mass;
+    }
+    return b.timeSec - a.timeSec;
+  });
+  state.scoreboard = state.scoreboard.slice(0, 50);
+  saveScoreboard(state.scoreboard);
+  renderScoreboard();
+
+  void submitScoreIfAvailable(entry).then((savedRemotely) => {
+    if (savedRemotely) {
+      void loadRemoteScoreboardIfAvailable();
+    }
+  });
+}
+
 const state = {
   width: canvas.width,
   height: canvas.height,
@@ -144,7 +397,11 @@ const state = {
   frameDtMs: 16.7,
   lastTs: 0,
   stepScale: 1,
-  poleSeed: normalizeSeed(urlParams.get("seed")),
+  poleSeed: 20260416,
+  survivalTimeSec: 0,
+  resultRecorded: false,
+  settings: loadSettings(),
+  scoreboard: loadScoreboard(),
 };
 
 const racket = {
@@ -155,6 +412,113 @@ const racket = {
   angle: 0,
   glow: 0,
 };
+
+let audioCtx = null;
+let musicStarted = false;
+let musicStepTimer = null;
+
+function ensureAudioContext() {
+  if (audioCtx) {
+    return audioCtx;
+  }
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) {
+    return null;
+  }
+  audioCtx = new Ctor();
+  return audioCtx;
+}
+
+function unlockAudio() {
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef) {
+    return;
+  }
+  if (ctxRef.state === "suspended") {
+    void ctxRef.resume();
+  }
+  startBackgroundMusic();
+}
+
+function startBackgroundMusic() {
+  if (musicStarted) {
+    return;
+  }
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef || ctxRef.state !== "running") {
+    return;
+  }
+
+  musicStarted = true;
+
+  const bassGain = ctxRef.createGain();
+  bassGain.gain.value = 0.02;
+  bassGain.connect(ctxRef.destination);
+
+  const bassOsc = ctxRef.createOscillator();
+  bassOsc.type = "sine";
+  bassOsc.frequency.value = 73.42;
+  bassOsc.connect(bassGain);
+  bassOsc.start();
+
+  const pattern = [0, 3, 7, 10, 7, 3, 12, 10];
+  let step = 0;
+  const base = 220;
+
+  musicStepTimer = window.setInterval(() => {
+    const t = ctxRef.currentTime;
+    const noteGain = ctxRef.createGain();
+    const noteOsc = ctxRef.createOscillator();
+    const semitone = pattern[step % pattern.length];
+    const freq = base * Math.pow(2, semitone / 12);
+
+    noteOsc.type = "triangle";
+    noteOsc.frequency.setValueAtTime(freq, t);
+    noteGain.gain.setValueAtTime(0.0001, t);
+    noteGain.gain.exponentialRampToValueAtTime(0.018, t + 0.02);
+    noteGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+
+    noteOsc.connect(noteGain);
+    noteGain.connect(ctxRef.destination);
+    noteOsc.start(t);
+    noteOsc.stop(t + 0.3);
+
+    step += 1;
+  }, 280);
+}
+
+function playBonk(strength = 1) {
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef || ctxRef.state !== "running") {
+    return;
+  }
+
+  const now = ctxRef.currentTime;
+  const osc = ctxRef.createOscillator();
+  const noise = ctxRef.createOscillator();
+  const gain = ctxRef.createGain();
+
+  osc.type = "triangle";
+  osc.frequency.setValueAtTime(160 + strength * 60, now);
+  osc.frequency.exponentialRampToValueAtTime(74, now + 0.14);
+
+  noise.type = "square";
+  noise.frequency.setValueAtTime(220 + strength * 90, now);
+  noise.frequency.exponentialRampToValueAtTime(110, now + 0.08);
+
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.16 * strength, now + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.19);
+
+  osc.connect(gain);
+  noise.connect(gain);
+  gain.connect(ctxRef.destination);
+
+  osc.start(now);
+  noise.start(now);
+  osc.stop(now + 0.2);
+  noise.stop(now + 0.12);
+}
 
 function randomRange(min, max) {
   return min + Math.random() * (max - min);
@@ -185,7 +549,7 @@ function refreshLevelFromMass() {
 }
 
 function spawnBall(x, y, vx = 0, vy = -2.2, radius = 12, splitCooldown = 10) {
-  const hue = Math.floor(randomRange(24, 56));
+  const hue = Math.floor(randomRange(70, 88));
   const mass = Math.PI * radius * radius * 0.026;
   state.balls.push({
     x,
@@ -201,17 +565,39 @@ function spawnBall(x, y, vx = 0, vy = -2.2, radius = 12, splitCooldown = 10) {
     alive: true,
     splitCooldown,
     trail: [],
+    spin: randomRange(-0.05, 0.05),
+    spinAngle: randomRange(0, Math.PI * 2),
+    z: 0,
+    vz: 0,
+    bonkCooldown: 0,
     scoredPoles: new Set(),
   });
 }
 
 function spawnPole() {
   const level = currentLevel();
+  const tipHeight = 82;
   const x = state.width + 120;
   const tipWidth = poleRandomRange(level.tipWidthMin, level.tipWidthMax);
   const bodyWidth = poleRandomRange(44, 86);
   const opening = poleRandomRange(level.openingMin, level.openingMax);
-  const gapY = poleRandomRange(170, state.height - 170);
+  let driftAmp = poleRandomRange(10, 22);
+  const driftSpeed = poleRandomRange(0.018, 0.03);
+  const driftPhase = poleRandomRange(0, Math.PI * 2);
+
+  const openHalf = opening * 0.5;
+  const margin = tipHeight + openHalf + 16;
+
+  let minGapY = margin + driftAmp + 2;
+  let maxGapY = state.height - margin - driftAmp - 2;
+
+  if (minGapY >= maxGapY) {
+    driftAmp = Math.max(3, Math.min(10, state.height * 0.5 - margin - 4));
+    minGapY = margin + driftAmp + 2;
+    maxGapY = state.height - margin - driftAmp - 2;
+  }
+
+  const gapY = minGapY < maxGapY ? poleRandomRange(minGapY, maxGapY) : state.height * 0.5;
 
   state.poles.push({
     id: state.poleSerial,
@@ -222,14 +608,15 @@ function spawnPole() {
     opening,
     baseGapY: gapY,
     gapY,
-    driftAmp: poleRandomRange(10, 22),
-    driftSpeed: poleRandomRange(0.018, 0.03),
-    driftPhase: poleRandomRange(0, Math.PI * 2),
+    driftAmp,
+    driftSpeed,
+    driftPhase,
   });
   state.poleSerial += 1;
 }
 
 function resetGame() {
+  state.poleSeed = chooseRunSeed();
   setPoleSeed(state.poleSeed);
   state.balls.length = 0;
   state.poles.length = 0;
@@ -244,6 +631,8 @@ function resetGame() {
   state.nextPoleAt = 260;
   state.poleSerial = 0;
   state.lost = false;
+  state.survivalTimeSec = 0;
+  state.resultRecorded = false;
   spawnBall(state.width * 0.5, state.height * 0.48);
   for (let i = 0; i < 3; i += 1) {
     spawnPole();
@@ -539,11 +928,53 @@ function drawPoleSegment(pole, top) {
 
 function drawBalls() {
   state.balls.forEach((ball) => {
+    const renderScale = 1 + ball.z * 0.075;
+    const renderRadius = ball.radius * renderScale;
+    const renderY = ball.y + ball.z * 0.55;
+
     if (state.lowPerfMode) {
-      ctx.fillStyle = `hsla(${ball.hue + 10}, 88%, 62%, 0.94)`;
+      const simpleGlow = ctx.createRadialGradient(
+        ball.x - renderRadius * 0.24,
+        renderY - renderRadius * 0.28,
+        renderRadius * 0.22,
+        ball.x,
+        renderY,
+        renderRadius * 1.2,
+      );
+      simpleGlow.addColorStop(0, `hsla(${ball.hue - 4}, 94%, 72%, 0.98)`);
+      simpleGlow.addColorStop(0.68, `hsla(${ball.hue}, 90%, 56%, 0.96)`);
+      simpleGlow.addColorStop(1, `hsla(${ball.hue + 4}, 80%, 40%, 0.22)`);
+      ctx.fillStyle = simpleGlow;
       ctx.beginPath();
-      ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+      ctx.arc(ball.x, renderY, renderRadius, 0, Math.PI * 2);
       ctx.fill();
+
+      const seamTilt = ball.spinAngle + Math.atan2(ball.vy, ball.vx) * 0.1;
+      ctx.save();
+      ctx.translate(ball.x, renderY);
+      ctx.rotate(seamTilt);
+
+      ctx.strokeStyle = "rgba(16, 20, 15, 0.74)";
+      ctx.lineWidth = Math.max(0.9, renderRadius * 0.15);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.arc(0, -renderRadius * 0.03, renderRadius * 0.84, Math.PI * 0.14, Math.PI * 1.22);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(0, renderRadius * 0.03, renderRadius * 0.84, -Math.PI * 1.22, -Math.PI * 0.14);
+      ctx.stroke();
+
+      ctx.strokeStyle = "rgba(56, 62, 48, 0.52)";
+      ctx.lineWidth = Math.max(0.7, renderRadius * 0.09);
+      ctx.beginPath();
+      ctx.arc(0, -renderRadius * 0.03, renderRadius * 0.84, Math.PI * 0.17, Math.PI * 1.19);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(0, renderRadius * 0.03, renderRadius * 0.84, -Math.PI * 1.19, -Math.PI * 0.17);
+      ctx.stroke();
+      ctx.restore();
       return;
     }
 
@@ -559,32 +990,91 @@ function drawBalls() {
     }
 
     const glow = ctx.createRadialGradient(
-      ball.x - ball.radius * 0.2,
-      ball.y - ball.radius * 0.3,
-      ball.radius * 0.2,
+      ball.x - renderRadius * 0.3,
+      renderY - renderRadius * 0.36,
+      renderRadius * 0.18,
       ball.x,
-      ball.y,
-      ball.radius * 1.6,
+      renderY,
+      renderRadius * 1.55,
     );
-    glow.addColorStop(0, `hsla(${ball.hue}, 100%, 90%, 0.97)`);
-    glow.addColorStop(0.66, `hsla(${ball.hue + 12}, 90%, 58%, 0.9)`);
-    glow.addColorStop(1, `hsla(${ball.hue + 30}, 92%, 30%, 0.12)`);
+    glow.addColorStop(0, `hsla(${ball.hue - 5}, 96%, 74%, 0.98)`);
+    glow.addColorStop(0.62, `hsla(${ball.hue}, 90%, 57%, 0.95)`);
+    glow.addColorStop(1, `hsla(${ball.hue + 4}, 84%, 34%, 0.18)`);
     ctx.fillStyle = glow;
 
     ctx.beginPath();
-    ctx.arc(ball.x, ball.y, ball.radius * 1.25, 0, Math.PI * 2);
+    ctx.arc(ball.x, renderY, renderRadius * 1.25, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = `hsla(${ball.hue}, 98%, 95%, 0.95)`;
+    ctx.fillStyle = "rgba(250, 255, 214, 0.62)";
     ctx.beginPath();
-    ctx.arc(ball.x - ball.radius * 0.25, ball.y - ball.radius * 0.28, ball.radius * 0.35, 0, Math.PI * 2);
+    ctx.arc(ball.x - renderRadius * 0.28, renderY - renderRadius * 0.32, renderRadius * 0.3, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.strokeStyle = `hsla(${ball.hue + 18}, 92%, 96%, 0.52)`;
-    ctx.lineWidth = Math.max(1, ball.radius * 0.08);
+    // Draw classic tennis seams clipped to the sphere for a realistic look.
+    const seamTilt = ball.spinAngle + Math.atan2(ball.vy, ball.vx) * 0.1;
+    ctx.save();
+    ctx.translate(ball.x, renderY);
+    ctx.rotate(seamTilt);
     ctx.beginPath();
-    ctx.arc(ball.x, ball.y, ball.radius * 0.74, Math.PI * 0.16, Math.PI * 1.28);
+    ctx.arc(0, 0, renderRadius * 1.26, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.strokeStyle = "rgba(18, 23, 16, 0.78)";
+    ctx.lineWidth = Math.max(2.2, renderRadius * 0.24);
+    ctx.lineCap = "round";
+
+    ctx.beginPath();
+    ctx.moveTo(-renderRadius * 1.1, -renderRadius * 0.46);
+    ctx.bezierCurveTo(
+      -renderRadius * 0.2,
+      -renderRadius * 0.92,
+      renderRadius * 0.2,
+      -renderRadius * 0.92,
+      renderRadius * 1.1,
+      -renderRadius * 0.46,
+    );
     ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(-renderRadius * 1.1, renderRadius * 0.46);
+    ctx.bezierCurveTo(
+      -renderRadius * 0.2,
+      renderRadius * 0.92,
+      renderRadius * 0.2,
+      renderRadius * 0.92,
+      renderRadius * 1.1,
+      renderRadius * 0.46,
+    );
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(60, 67, 50, 0.55)";
+    ctx.lineWidth = Math.max(1.2, renderRadius * 0.14);
+
+    ctx.beginPath();
+    ctx.moveTo(-renderRadius * 1.06, -renderRadius * 0.46);
+    ctx.bezierCurveTo(
+      -renderRadius * 0.18,
+      -renderRadius * 0.86,
+      renderRadius * 0.18,
+      -renderRadius * 0.86,
+      renderRadius * 1.06,
+      -renderRadius * 0.46,
+    );
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(-renderRadius * 1.06, renderRadius * 0.46);
+    ctx.bezierCurveTo(
+      -renderRadius * 0.18,
+      renderRadius * 0.86,
+      renderRadius * 0.18,
+      renderRadius * 0.86,
+      renderRadius * 1.06,
+      renderRadius * 0.46,
+    );
+    ctx.stroke();
+    ctx.restore();
   });
 }
 
@@ -642,13 +1132,18 @@ function updatePoles() {
   state.nextPoleAt -= state.scrollSpeed * state.stepScale;
   if (state.nextPoleAt <= 0) {
     spawnPole();
-    state.nextPoleAt = randomRange(level.poleSpacingMin, level.poleSpacingMax);
+    state.nextPoleAt = poleRandomRange(level.poleSpacingMin, level.poleSpacingMax);
   }
 }
 
 function animatePoleDrift() {
   const tipHeight = 82;
   state.poles.forEach((pole) => {
+    if (!state.settings.obstaclesMove) {
+      pole.gapY = pole.baseGapY;
+      return;
+    }
+
     const openHalf = pole.opening * 0.5;
     const margin = tipHeight + openHalf + 16;
     pole.gapY = clamp(
@@ -796,13 +1291,21 @@ function racketLocalToWorld(x, y) {
 function updateBalls() {
   const maxY = state.height + 120;
   const dragScale = Math.pow(state.drag, state.stepScale);
+  const spinDamping = Math.pow(0.992, state.stepScale);
+  const zDamping = Math.pow(0.982, state.stepScale);
 
   state.balls.forEach((ball) => {
     ball.splitCooldown = Math.max(0, ball.splitCooldown - state.stepScale);
+    ball.bonkCooldown = Math.max(0, ball.bonkCooldown - state.stepScale);
     ball.prevX = ball.x;
     ball.prevY = ball.y;
 
+    ball.spin *= spinDamping;
+    ball.spinAngle += ball.spin * state.stepScale;
+
     ball.vy += state.gravity * state.stepScale;
+    // Mild magnus force from spin so angled hits can curve in flight.
+    ball.vx += -ball.vy * ball.spin * 0.006 * state.stepScale;
     ball.vx *= dragScale;
     ball.vy *= dragScale;
 
@@ -862,7 +1365,35 @@ function updateBalls() {
       ball.vx = clamp(ball.vx, -10, 10);
       ball.vy = -impulse;
       ball.y -= 4;
+
+      const spinKick = clamp(edgeRatio * 0.35 + racket.angle * 0.75 + mouseSteer * 0.08, -0.75, 0.75);
+      ball.spin += spinKick;
+
+      if (Math.random() < 0.58) {
+        const towardScreen = (2.3 + Math.abs(edgeRatio) * 2.2 + Math.abs(mouseSteer) * 0.28) * randomRange(0.9, 1.35);
+        ball.vz += towardScreen;
+      }
+
       emitParticles(ball.x, ball.y + 5, 3, ball.hue);
+    }
+
+    ball.vz *= zDamping;
+    ball.z += ball.vz * state.stepScale;
+    const zMax = 14.5;
+    if (ball.z > zMax) {
+      const impact = Math.abs(ball.vz);
+      ball.z = zMax;
+      if (ball.vz > 0) {
+        ball.vz = -Math.abs(ball.vz) * 0.7;
+      }
+      if (ball.bonkCooldown <= 0) {
+        ball.bonkCooldown = 22;
+        playBonk(clamp(impact * 0.24, 0.8, 1.35));
+      }
+    }
+    if (ball.z < 0) {
+      ball.z = 0;
+      ball.vz = Math.max(0, ball.vz);
     }
 
     state.poles.forEach((pole) => {
@@ -924,6 +1455,8 @@ function updateHud() {
 
   scoreEl.textContent = `Mass: ${state.massScore.toFixed(1)}`;
   bestEl.textContent = `Best Mass: ${state.best.toFixed(1)}`;
+  timeEl.textContent = `Time: ${formatDuration(state.survivalTimeSec)}`;
+  moveModeEl.textContent = `Obstacles: ${state.settings.obstaclesMove ? "Moving" : "Static"}`;
   levelEl.textContent = `Level: ${currentLevel().label}`;
   ballsEl.textContent = `Balls: ${state.balls.length}`;
 }
@@ -931,17 +1464,18 @@ function updateHud() {
 function drawGameOver() {
   const y = state.height * 0.42;
   ctx.fillStyle = "rgba(3, 8, 12, 0.58)";
-  ctx.fillRect(0, y - 82, state.width, 188);
+  ctx.fillRect(0, y - 100, state.width, 220);
 
   ctx.textAlign = "center";
   ctx.fillStyle = "#fff4d2";
-  ctx.font = "700 48px Avenir Next";
-  ctx.fillText("All Balls Lost", state.width * 0.5, y);
+  ctx.font = "700 58px Avenir Next";
+  ctx.fillText("All Balls Lost", state.width * 0.5, y - 8);
 
-  ctx.font = "500 28px Avenir Next";
+  ctx.font = "500 26px Avenir Next";
   ctx.fillStyle = "#defbe8";
-  ctx.fillText(`Mass Collected: ${state.massScore.toFixed(1)} | Level ${currentLevel().label}`, state.width * 0.5, y + 40);
-  ctx.fillText("Click to restart", state.width * 0.5, y + 80);
+  ctx.fillText(`Mass Collected: ${state.massScore.toFixed(1)} | Level ${currentLevel().label}`, state.width * 0.5, y + 34);
+  ctx.fillText(`Time Endured: ${formatDuration(state.survivalTimeSec)}`, state.width * 0.5, y + 68);
+  ctx.fillText("Click to restart", state.width * 0.5, y + 102);
 }
 
 function updateTip() {
@@ -952,9 +1486,50 @@ function updateTip() {
   }
 }
 
+function updateSettingsHint() {
+  if (state.settings.layoutMode === "public-fixed") {
+    const setMeta = getCurrentObstacleSet();
+    settingsHintEl.textContent = `Public fixed set: ${setMeta.label} (seed ${setMeta.seed}). Same obstacle positions for all players.`;
+    obstacleSetSelectEl.disabled = false;
+  } else {
+    settingsHintEl.textContent = "Development randomized mode uses a fresh obstacle seed each run.";
+    obstacleSetSelectEl.disabled = true;
+  }
+}
+
+function renderObstacleSetOptions() {
+  const optionsHtml = Object.entries(OBSTACLE_DATABASE)
+    .map(([setId, setMeta]) => `<option value="${setId}">${setMeta.label}</option>`)
+    .join("");
+  obstacleSetSelectEl.innerHTML = optionsHtml;
+}
+
+function syncSettingsUI() {
+  renderObstacleSetOptions();
+  moveObstaclesToggleEl.checked = state.settings.obstaclesMove;
+  layoutModeSelectEl.value = state.settings.layoutMode;
+  obstacleSetSelectEl.value = state.settings.obstacleSetId;
+  updateSettingsHint();
+}
+
+function applySettingsFromUI() {
+  state.settings.obstaclesMove = moveObstaclesToggleEl.checked;
+  state.settings.layoutMode = layoutModeSelectEl.value === "dev-random" ? "dev-random" : "public-fixed";
+  state.settings.obstacleSetId = OBSTACLE_DATABASE[obstacleSetSelectEl.value] ? obstacleSetSelectEl.value : "season-1";
+  saveSettings(state.settings);
+  syncSettingsUI();
+  resetGame();
+}
+
+function setSettingsPanelOpen(isOpen) {
+  settingsPanel.hidden = !isOpen;
+  settingsBtn.setAttribute("aria-expanded", String(isOpen));
+}
+
 function tick(ts = 0) {
+  let dt = 16.6667;
   if (state.lastTs > 0) {
-    const dt = Math.max(1, Math.min(60, ts - state.lastTs));
+    dt = Math.max(1, Math.min(60, ts - state.lastTs));
     state.frameDtMs += (dt - state.frameDtMs) * 0.12;
     state.stepScale = Math.max(0.75, Math.min(2.2, dt / 16.6667));
     if (!state.lowPerfMode && state.frameDtMs > 19.5) {
@@ -973,14 +1548,20 @@ function tick(ts = 0) {
   drawBackground();
 
   if (!state.lost) {
+    state.survivalTimeSec += dt / 1000;
     refreshLevelFromMass();
     updatePoles();
     updateBalls();
     updateParticles();
-    updateHud();
   } else {
     updateParticles();
+    if (!state.resultRecorded) {
+      recordRunResult();
+      state.resultRecorded = true;
+    }
   }
+
+  updateHud();
 
   drawPoles();
   drawParticles();
@@ -1022,13 +1603,66 @@ canvas.addEventListener("touchmove", (event) => {
 }, { passive: false });
 
 canvas.addEventListener("click", () => {
+  unlockAudio();
   if (state.lost) {
     resetGame();
   }
 });
 
+canvas.addEventListener("mousedown", () => {
+  unlockAudio();
+});
+
+canvas.addEventListener("touchstart", () => {
+  unlockAudio();
+}, { passive: true });
+
+settingsBtn.addEventListener("click", () => {
+  setSettingsPanelOpen(settingsPanel.hidden);
+});
+
+closeSettingsBtn.addEventListener("click", () => {
+  setSettingsPanelOpen(false);
+});
+
+layoutModeSelectEl.addEventListener("change", () => {
+  state.settings.layoutMode = layoutModeSelectEl.value === "dev-random" ? "dev-random" : "public-fixed";
+  state.settings.obstacleSetId = OBSTACLE_DATABASE[obstacleSetSelectEl.value] ? obstacleSetSelectEl.value : "season-1";
+  updateSettingsHint();
+});
+
+obstacleSetSelectEl.addEventListener("change", () => {
+  state.settings.obstacleSetId = OBSTACLE_DATABASE[obstacleSetSelectEl.value] ? obstacleSetSelectEl.value : "season-1";
+  updateSettingsHint();
+});
+
+applySettingsBtn.addEventListener("click", () => {
+  applySettingsFromUI();
+  setSettingsPanelOpen(false);
+});
+
+const moveFromQuery = urlParams.get("move");
+if (moveFromQuery === "0" || moveFromQuery === "false") {
+  state.settings.obstaclesMove = false;
+}
+
+if (urlParams.get("layout") === "public-fixed" || urlParams.get("layout") === "dev-random") {
+  state.settings.layoutMode = urlParams.get("layout");
+}
+
 scoreEl.textContent = "Mass: 0.0";
 bestEl.textContent = `Best Mass: ${state.best.toFixed(1)}`;
+timeEl.textContent = "Time: 0.0s";
+moveModeEl.textContent = `Obstacles: ${state.settings.obstaclesMove ? "Moving" : "Static"}`;
 levelEl.textContent = "Level: 1";
-resetGame();
-requestAnimationFrame(tick);
+
+async function bootGame() {
+  await loadRemoteConfigIfAvailable();
+  syncSettingsUI();
+  renderScoreboard();
+  await loadRemoteScoreboardIfAvailable();
+  resetGame();
+  requestAnimationFrame(tick);
+}
+
+void bootGame();

@@ -59,6 +59,7 @@ body {
   flex-wrap: wrap;
   gap: 10px;
   font-weight: 600;
+  align-items: center;
 }
 
 .hud-stats span {
@@ -69,6 +70,76 @@ body {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
   position: relative;
   overflow: hidden;
+}
+
+.hud-btn {
+  border: 1px solid rgba(226, 255, 246, 0.34);
+  background: linear-gradient(135deg, rgba(18, 42, 44, 0.95), rgba(24, 68, 63, 0.92));
+  color: #d9fff6;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font: 700 0.86rem "Chakra Petch", "Avenir Next", sans-serif;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.hud-btn.ghost {
+  background: rgba(5, 18, 25, 0.65);
+}
+
+.settings-panel {
+  margin-bottom: 10px;
+  padding: 14px;
+  border: 1px solid rgba(220, 255, 250, 0.22);
+  border-radius: 14px;
+  background: linear-gradient(140deg, rgba(8, 22, 29, 0.94), rgba(12, 38, 41, 0.88));
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.26);
+}
+
+.settings-panel[hidden] {
+  display: none;
+}
+
+.settings-panel h2 {
+  margin: 0 0 12px;
+  font: 700 1rem "Chakra Petch", "Avenir Next", sans-serif;
+  letter-spacing: 0.08em;
+  color: #dbfff2;
+  text-transform: uppercase;
+}
+
+.setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  color: rgba(234, 246, 242, 0.95);
+}
+
+.setting-row select,
+.setting-row input[type="checkbox"] {
+  accent-color: #5effdb;
+}
+
+.setting-row select {
+  min-width: 250px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(226, 255, 246, 0.28);
+  background: rgba(7, 20, 26, 0.82);
+  color: #d8fff6;
+}
+
+.settings-hint {
+  margin: 4px 0 12px;
+  color: rgba(197, 238, 229, 0.86);
+  font-size: 0.9rem;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .hud-stats span::before {
@@ -146,6 +217,60 @@ body {
   text-wrap: balance;
 }
 
+.scoreboard {
+  margin-top: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(219, 255, 244, 0.2);
+  background: linear-gradient(140deg, rgba(8, 21, 28, 0.86), rgba(10, 33, 39, 0.72));
+  padding: 12px;
+}
+
+.scoreboard-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.scoreboard-head h2 {
+  margin: 0;
+  font: 700 1rem "Chakra Petch", "Avenir Next", sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #e7fff5;
+}
+
+.scoreboard-sub {
+  color: rgba(201, 238, 233, 0.88);
+  font-size: 0.86rem;
+}
+
+.scoreboard-table-wrap {
+  overflow-x: auto;
+}
+
+.scoreboard-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.scoreboard-table th,
+.scoreboard-table td {
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(210, 250, 240, 0.14);
+}
+
+.scoreboard-table th {
+  color: #d3fff3;
+  font-weight: 700;
+}
+
+.scoreboard-table td {
+  color: rgba(234, 246, 241, 0.94);
+}
+
 .legend p {
   margin: 0;
 }
@@ -179,5 +304,15 @@ body {
 
   .hud-stats span {
     font-size: 0.85rem;
+  }
+
+  .setting-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .setting-row select {
+    min-width: 0;
+    width: 100%;
   }
 }
