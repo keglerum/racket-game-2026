@@ -1,6 +1,44 @@
 const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
 const isEmbeddedBrowser = /electron|vscode/i.test(navigator.userAgent);
+const urlParams = new URLSearchParams(window.location.search);
+
+function hashStringToSeed(input) {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function normalizeSeed(seedLike) {
+  if (seedLike === null || seedLike === undefined || seedLike === "") {
+    return 20260416;
+  }
+  const asNumber = Number(seedLike);
+  if (Number.isFinite(asNumber)) {
+    return (Math.floor(asNumber) >>> 0) || 1;
+  }
+  return hashStringToSeed(String(seedLike)) || 1;
+}
+
+let poleRngState = 1;
+
+function setPoleSeed(seed) {
+  poleRngState = (seed >>> 0) || 1;
+}
+
+function poleRandom() {
+  poleRngState ^= poleRngState << 13;
+  poleRngState ^= poleRngState >>> 17;
+  poleRngState ^= poleRngState << 5;
+  return (poleRngState >>> 0) / 4294967296;
+}
+
+function poleRandomRange(min, max) {
+  return min + poleRandom() * (max - min);
+}
 
 // Clamp DPR to 1 so Retina displays don't render at 4× pixel count
 canvas.width = 1280;
@@ -106,6 +144,7 @@ const state = {
   frameDtMs: 16.7,
   lastTs: 0,
   stepScale: 1,
+  poleSeed: normalizeSeed(urlParams.get("seed")),
 };
 
 const racket = {
@@ -169,10 +208,10 @@ function spawnBall(x, y, vx = 0, vy = -2.2, radius = 12, splitCooldown = 10) {
 function spawnPole() {
   const level = currentLevel();
   const x = state.width + 120;
-  const tipWidth = randomRange(level.tipWidthMin, level.tipWidthMax);
-  const bodyWidth = randomRange(44, 86);
-  const opening = randomRange(level.openingMin, level.openingMax);
-  const gapY = randomRange(170, state.height - 170);
+  const tipWidth = poleRandomRange(level.tipWidthMin, level.tipWidthMax);
+  const bodyWidth = poleRandomRange(44, 86);
+  const opening = poleRandomRange(level.openingMin, level.openingMax);
+  const gapY = poleRandomRange(170, state.height - 170);
 
   state.poles.push({
     id: state.poleSerial,
@@ -181,12 +220,17 @@ function spawnPole() {
     bodyWidth,
     tipWidth,
     opening,
+    baseGapY: gapY,
     gapY,
+    driftAmp: poleRandomRange(10, 22),
+    driftSpeed: poleRandomRange(0.018, 0.03),
+    driftPhase: poleRandomRange(0, Math.PI * 2),
   });
   state.poleSerial += 1;
 }
 
 function resetGame() {
+  setPoleSeed(state.poleSeed);
   state.balls.length = 0;
   state.poles.length = 0;
   state.particles.length = 0;
@@ -242,6 +286,18 @@ function drawBackground() {
   sun.addColorStop(1, "rgba(255, 216, 156, 0)");
   ctx.fillStyle = sun;
   ctx.fillRect(0, 0, state.width, state.height);
+
+  const beamCount = state.lowPerfMode ? 1 : 3;
+  for (let i = 0; i < beamCount; i += 1) {
+    const beamY = (state.time * (0.34 + i * 0.08) + i * 190) % (state.height + 220) - 110;
+    const beamH = 80 + i * 18;
+    const beam = ctx.createLinearGradient(0, beamY, 0, beamY + beamH);
+    beam.addColorStop(0, "rgba(166, 245, 236, 0)");
+    beam.addColorStop(0.5, "rgba(166, 245, 236, 0.055)");
+    beam.addColorStop(1, "rgba(166, 245, 236, 0)");
+    ctx.fillStyle = beam;
+    ctx.fillRect(0, beamY, state.width, beamH);
+  }
 
   const starCount = state.lowPerfMode ? 12 : 28;
   for (let i = 0; i < starCount; i += 1) {
@@ -574,6 +630,7 @@ function updatePoles() {
 
   state.poles.forEach((pole) => {
     pole.x -= state.scrollSpeed * state.stepScale;
+
     if (!pole.passed && pole.x + pole.bodyWidth < racket.x) {
       pole.passed = true;
       state.score += 1;
@@ -587,6 +644,19 @@ function updatePoles() {
     spawnPole();
     state.nextPoleAt = randomRange(level.poleSpacingMin, level.poleSpacingMax);
   }
+}
+
+function animatePoleDrift() {
+  const tipHeight = 82;
+  state.poles.forEach((pole) => {
+    const openHalf = pole.opening * 0.5;
+    const margin = tipHeight + openHalf + 16;
+    pole.gapY = clamp(
+      pole.baseGapY + Math.sin(state.time * pole.driftSpeed + pole.driftPhase) * pole.driftAmp,
+      margin,
+      state.height - margin,
+    );
+  });
 }
 
 function ballIntersectsSpike(ball, pole) {
@@ -898,6 +968,7 @@ function tick(ts = 0) {
   state.lastTs = ts;
 
   state.time += state.stepScale;
+  animatePoleDrift();
 
   drawBackground();
 
