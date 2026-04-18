@@ -55,6 +55,7 @@ async function initDb() {
       mass REAL NOT NULL,
       time_sec REAL NOT NULL,
       rank_score REAL NOT NULL DEFAULT 0,
+      challenge_mode TEXT NOT NULL DEFAULT 'normal',
       obstacles_move INTEGER NOT NULL,
       layout_label TEXT NOT NULL,
       seed INTEGER NOT NULL,
@@ -64,6 +65,12 @@ async function initDb() {
 
   try {
     await run("ALTER TABLE scores ADD COLUMN rank_score REAL NOT NULL DEFAULT 0");
+  } catch (_err) {
+    // Column already exists in upgraded databases.
+  }
+
+  try {
+    await run("ALTER TABLE scores ADD COLUMN challenge_mode TEXT NOT NULL DEFAULT 'normal'");
   } catch (_err) {
     // Column already exists in upgraded databases.
   }
@@ -107,22 +114,26 @@ app.get("/api/config", async (_req, res) => {
 app.get("/api/scores", async (req, res) => {
   const requestedLimit = Number(req.query.limit || 50);
   const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(200, Math.floor(requestedLimit))) : 50;
+  const requestedMode = String(req.query.mode || "normal").toLowerCase();
+  const mode = requestedMode === "hard" || requestedMode === "expert" ? requestedMode : "normal";
 
   try {
     const rows = await all(
       `
-      SELECT mass, time_sec, rank_score, obstacles_move, layout_label, seed, created_at
+      SELECT mass, time_sec, rank_score, challenge_mode, obstacles_move, layout_label, seed, created_at
       FROM scores
+      WHERE challenge_mode = ?
       ORDER BY rank_score DESC, mass DESC, time_sec DESC, created_at ASC
       LIMIT ?
       `,
-      [limit],
+      [mode, limit],
     );
 
     const scores = rows.map((row) => ({
       mass: row.mass,
       timeSec: row.time_sec,
       rankScore: row.rank_score,
+      challengeMode: row.challenge_mode,
       obstaclesMove: Boolean(row.obstacles_move),
       layoutLabel: row.layout_label,
       seed: row.seed,
@@ -138,6 +149,8 @@ app.get("/api/scores", async (req, res) => {
 app.post("/api/scores", async (req, res) => {
   const mass = Number(req.body.mass);
   const timeSec = Number(req.body.timeSec);
+  const challengeModeRaw = String(req.body.challengeMode || "normal").toLowerCase();
+  const challengeMode = challengeModeRaw === "hard" || challengeModeRaw === "expert" ? challengeModeRaw : "normal";
   const obstaclesMove = Boolean(req.body.obstaclesMove);
   const layoutLabel = String(req.body.layoutLabel || "Unknown").slice(0, 80);
   const seed = Number(req.body.seed);
@@ -153,10 +166,10 @@ app.post("/api/scores", async (req, res) => {
   try {
     await run(
       `
-      INSERT INTO scores (mass, time_sec, rank_score, obstacles_move, layout_label, seed, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO scores (mass, time_sec, rank_score, challenge_mode, obstacles_move, layout_label, seed, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `,
-      [mass, timeSec, rankScore, obstaclesMove ? 1 : 0, layoutLabel, Math.floor(seed), Date.now()],
+      [mass, timeSec, rankScore, challengeMode, obstaclesMove ? 1 : 0, layoutLabel, Math.floor(seed), Date.now()],
     );
     res.status(201).json({ ok: true });
   } catch (err) {

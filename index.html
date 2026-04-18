@@ -64,6 +64,14 @@
             <option value="season-2">Season 2</option>
           </select>
         </label>
+        <label class="setting-row" for="challengeModeSelect">
+          <span>Challenge Preset</span>
+          <select id="challengeModeSelect">
+            <option value="normal">Normal</option>
+            <option value="hard">Hard</option>
+            <option value="expert">Expert</option>
+          </select>
+        </label>
         <p id="settingsHint" class="settings-hint"></p>
         <div class="settings-actions">
           <button id="applySettingsBtn" class="hud-btn" type="button">Apply & Restart</button>
@@ -79,7 +87,7 @@
       <section class="scoreboard" aria-label="Score board">
         <div class="scoreboard-head">
           <h2>Score Board</h2>
-          <span class="scoreboard-sub">Rank Score = Mass + (Time x 2.5)</span>
+          <span id="scoreboardSub" class="scoreboard-sub">Rank Score = Mass + (Time x 2.5) • Mode: Normal</span>
         </div>
         <div class="scoreboard-table-wrap">
           <table class="scoreboard-table">

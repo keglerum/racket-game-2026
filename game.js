@@ -56,10 +56,12 @@ const settingsPanel = document.getElementById("settingsPanel");
 const moveObstaclesToggleEl = document.getElementById("moveObstaclesToggle");
 const layoutModeSelectEl = document.getElementById("layoutModeSelect");
 const obstacleSetSelectEl = document.getElementById("obstacleSetSelect");
+const challengeModeSelectEl = document.getElementById("challengeModeSelect");
 const settingsHintEl = document.getElementById("settingsHint");
 const applySettingsBtn = document.getElementById("applySettingsBtn");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
 const scoreboardBodyEl = document.getElementById("scoreboardBody");
+const scoreboardSubEl = document.getElementById("scoreboardSub");
 
 const SETTINGS_STORAGE_KEY = "racket-drift-settings-v1";
 const SCOREBOARD_STORAGE_KEY = "racket-drift-scoreboard-v1";
@@ -69,6 +71,11 @@ const SCORE_TIME_WEIGHT = 2.5;
 const MIN_BALL_RADIUS = 5;
 const BALL_GROW_DELAY_STEPS = 130;
 const BALL_GROW_RATE = 0.012;
+const CHALLENGE_MODES = {
+  normal: { label: "Normal", turbulenceBands: 0, fatigueThreshold: 999, oneWaySplitters: false, planeWind: false },
+  hard: { label: "Hard", turbulenceBands: 1, fatigueThreshold: 34, oneWaySplitters: true, planeWind: true },
+  expert: { label: "Expert", turbulenceBands: 2, fatigueThreshold: 24, oneWaySplitters: true, planeWind: true },
+};
 
 let OBSTACLE_DATABASE = {
   "season-1": { label: "Season 1", seed: 20260416 },
@@ -172,6 +179,7 @@ function loadSettings() {
     obstaclesMove: true,
     layoutMode: defaultLayoutMode(),
     obstacleSetId: "season-1",
+    challengeMode: "normal",
   };
 
   try {
@@ -182,10 +190,12 @@ function loadSettings() {
     const parsed = JSON.parse(raw);
     const layoutMode = parsed.layoutMode === "dev-random" ? "dev-random" : "public-fixed";
     const obstacleSetId = OBSTACLE_DATABASE[parsed.obstacleSetId] ? parsed.obstacleSetId : "season-1";
+    const challengeMode = CHALLENGE_MODES[parsed.challengeMode] ? parsed.challengeMode : "normal";
     return {
       obstaclesMove: parsed.obstaclesMove !== false,
       layoutMode,
       obstacleSetId,
+      challengeMode,
     };
   } catch (_err) {
     return fallback;
@@ -254,7 +264,8 @@ async function loadRemoteScoreboardIfAvailable() {
   }
 
   try {
-    const payload = await fetchJson(`${API_SCORES_ENDPOINT}?limit=50`);
+    const mode = encodeURIComponent(state.settings.challengeMode || "normal");
+    const payload = await fetchJson(`${API_SCORES_ENDPOINT}?limit=50&mode=${mode}`);
     if (!payload || !Array.isArray(payload.scores)) {
       return;
     }
@@ -265,6 +276,7 @@ async function loadRemoteScoreboardIfAvailable() {
       obstaclesMove: Boolean(row.obstaclesMove),
       layoutLabel: String(row.layoutLabel || "-"),
       rankScore: Number(row.rankScore || calculateRankScore(Number(row.mass || 0), Number(row.timeSec || 0))),
+      challengeMode: CHALLENGE_MODES[row.challengeMode] ? row.challengeMode : "normal",
       seed: normalizeSeed(row.seed),
       createdAt: Number(row.createdAt || Date.now()),
     }));
@@ -302,6 +314,14 @@ function calculateRankScore(mass, timeSec) {
   return mass + timeSec * SCORE_TIME_WEIGHT;
 }
 
+function currentChallengeMode() {
+  return CHALLENGE_MODES[state.settings.challengeMode] ? state.settings.challengeMode : "normal";
+}
+
+function currentChallengeConfig() {
+  return CHALLENGE_MODES[currentChallengeMode()];
+}
+
 function getCurrentObstacleSet() {
   return OBSTACLE_DATABASE[state.settings.obstacleSetId] || OBSTACLE_DATABASE["season-1"];
 }
@@ -332,12 +352,23 @@ function renderScoreboard() {
     return;
   }
 
-  if (state.scoreboard.length === 0) {
+  const mode = currentChallengeMode();
+  const modeLabel = currentChallengeConfig().label;
+  if (scoreboardSubEl) {
+    scoreboardSubEl.textContent = `Rank Score = Mass + (Time x 2.5) • Mode: ${modeLabel}`;
+  }
+
+  const visibleRows = state.scoreboard.filter((row) => {
+    const rowMode = CHALLENGE_MODES[row.challengeMode] ? row.challengeMode : "normal";
+    return rowMode === mode;
+  });
+
+  if (visibleRows.length === 0) {
     scoreboardBodyEl.innerHTML = '<tr><td colspan="6">No runs yet. Finish a run to create score entries.</td></tr>';
     return;
   }
 
-  scoreboardBodyEl.innerHTML = state.scoreboard
+  scoreboardBodyEl.innerHTML = visibleRows
     .slice(0, 12)
     .map((row, index) => {
       const obstacles = row.obstaclesMove ? "Moving" : "Static";
@@ -362,6 +393,7 @@ function recordRunResult() {
     mass: state.massScore,
     timeSec: state.survivalTimeSec,
     rankScore,
+    challengeMode: currentChallengeMode(),
     obstaclesMove: state.settings.obstaclesMove,
     layoutLabel: getRunLayoutLabel(),
     seed: state.poleSeed,
@@ -426,6 +458,22 @@ const state = {
   resultRecorded: false,
   settings: loadSettings(),
   scoreboard: loadScoreboard(),
+  streakCount: 0,
+  streakTimer: 0,
+  massMultiplier: 1,
+  hazardTimer: 0,
+  hazardCooldown: 540,
+  hazardSpeedBoost: 1,
+  bossWaveTimer: 0,
+  bossWaveCooldown: 0,
+  bossWaveActive: false,
+  bossWaveCount: 0,
+  trailVariantUnlocked: false,
+  planeSpawnTimer: 320,
+  planes: [],
+  turbulenceZones: [],
+  racketStrain: 0,
+  racketFatigueTimer: 0,
 };
 
 const racket = {
@@ -544,6 +592,196 @@ function playBonk(strength = 1) {
   noise.stop(now + 0.12);
 }
 
+function playPlaneWhoosh(pan = 0, speed = 1) {
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef || ctxRef.state !== "running") {
+    return;
+  }
+
+  const now = ctxRef.currentTime;
+  const osc = ctxRef.createOscillator();
+  const gain = ctxRef.createGain();
+  const panner = ctxRef.createStereoPanner();
+
+  osc.type = "sawtooth";
+  osc.frequency.setValueAtTime(220 * speed, now);
+  osc.frequency.exponentialRampToValueAtTime(120 * speed, now + 0.65);
+  panner.pan.setValueAtTime(clamp(pan, -1, 1), now);
+  panner.pan.linearRampToValueAtTime(clamp(-pan, -1, 1), now + 0.65);
+
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.022, now + 0.06);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.7);
+
+  osc.connect(gain);
+  gain.connect(panner);
+  panner.connect(ctxRef.destination);
+
+  osc.start(now);
+  osc.stop(now + 0.72);
+}
+
+function playBossCue() {
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef || ctxRef.state !== "running") {
+    return;
+  }
+
+  const now = ctxRef.currentTime;
+  const gain = ctxRef.createGain();
+  gain.gain.value = 0.03;
+  gain.connect(ctxRef.destination);
+
+  const a = ctxRef.createOscillator();
+  a.type = "square";
+  a.frequency.setValueAtTime(330, now);
+  a.frequency.exponentialRampToValueAtTime(180, now + 0.18);
+  a.connect(gain);
+  a.start(now);
+  a.stop(now + 0.2);
+
+  const b = ctxRef.createOscillator();
+  b.type = "square";
+  b.frequency.setValueAtTime(392, now + 0.24);
+  b.frequency.exponentialRampToValueAtTime(220, now + 0.44);
+  b.connect(gain);
+  b.start(now + 0.24);
+  b.stop(now + 0.48);
+}
+
+function updateModeSystems() {
+  const modeCfg = currentChallengeConfig();
+
+  if (state.turbulenceZones.length !== modeCfg.turbulenceBands) {
+    state.turbulenceZones = [];
+    for (let i = 0; i < modeCfg.turbulenceBands; i += 1) {
+      state.turbulenceZones.push({
+        y: state.height * (0.26 + i * 0.22),
+        h: 90,
+        strength: 0.02 + i * 0.008,
+      });
+    }
+  }
+}
+
+function spawnPlane() {
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const y = randomRange(110, state.height * 0.46);
+  const speed = randomRange(3.4, 5.2);
+  const x = dir > 0 ? -80 : state.width + 80;
+  const plane = {
+    x,
+    y,
+    dir,
+    speed,
+    wing: randomRange(14, 22),
+    color: randomRange(0, 1) > 0.5 ? "#d8f4ff" : "#ffe7af",
+  };
+  state.planes.push(plane);
+  playPlaneWhoosh(dir > 0 ? -0.85 : 0.85, speed * 0.24);
+}
+
+function updatePlanes() {
+  const modeCfg = currentChallengeConfig();
+  state.planeSpawnTimer -= state.stepScale;
+  if (state.planeSpawnTimer <= 0) {
+    spawnPlane();
+    state.planeSpawnTimer = randomRange(420, 760);
+  }
+
+  state.planes.forEach((plane) => {
+    plane.x += plane.speed * plane.dir * state.stepScale;
+
+    if (modeCfg.planeWind && currentLevel().label >= 3) {
+      state.balls.forEach((ball) => {
+        const nearX = Math.abs(ball.x - plane.x) < 120;
+        const nearY = Math.abs(ball.y - plane.y) < 80;
+        if (nearX && nearY) {
+          ball.vx += plane.dir * 0.014 * state.stepScale;
+          ball.vy += Math.sin(state.time * 0.16 + plane.x * 0.02) * 0.006 * state.stepScale;
+        }
+      });
+    }
+  });
+
+  state.planes = state.planes.filter((plane) => plane.x > -120 && plane.x < state.width + 120);
+}
+
+function drawPlanes() {
+  state.planes.forEach((plane) => {
+    ctx.save();
+    ctx.translate(plane.x, plane.y);
+    if (plane.dir < 0) {
+      ctx.scale(-1, 1);
+    }
+    ctx.fillStyle = plane.color;
+    ctx.beginPath();
+    ctx.moveTo(-18, 0);
+    ctx.lineTo(20, -5);
+    ctx.lineTo(20, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "rgba(190, 241, 255, 0.82)";
+    ctx.fillRect(-4, -plane.wing * 0.2, 14, plane.wing * 0.4);
+    ctx.restore();
+  });
+}
+
+function updateHazardsAndBoss() {
+  if (state.bossWaveActive) {
+    state.bossWaveTimer -= state.stepScale;
+    if (state.bossWaveTimer <= 0) {
+      state.bossWaveActive = false;
+      state.bossWaveCooldown = 900;
+      state.massScore += 95;
+      state.trailVariantUnlocked = true;
+      emitParticles(racket.x, racket.y - 24, 36, 188);
+    }
+    return;
+  }
+
+  state.bossWaveCooldown = Math.max(0, state.bossWaveCooldown - state.stepScale);
+  if (state.bossWaveCooldown <= 0 && currentLevel().label >= 3 && currentLevel().label % 2 === 1) {
+    state.bossWaveActive = true;
+    state.bossWaveTimer = 620;
+    state.bossWaveCount += 1;
+    playBossCue();
+  }
+
+  if (state.hazardTimer > 0) {
+    state.hazardTimer -= state.stepScale;
+    if (state.hazardTimer <= 0) {
+      state.hazardSpeedBoost = 1;
+      state.massScore += 24;
+      emitParticles(racket.x, racket.y - 12, 14, 144);
+    }
+  } else {
+    state.hazardCooldown -= state.stepScale;
+    if (state.hazardCooldown <= 0 && currentLevel().label >= 2) {
+      state.hazardTimer = randomRange(280, 430);
+      state.hazardCooldown = randomRange(520, 760);
+      state.hazardSpeedBoost = currentChallengeMode() === "expert" ? 1.58 : 1.34;
+      playBossCue();
+    }
+  }
+}
+
+function drawChallengeOverlays() {
+  if (state.turbulenceZones.length > 0 && currentChallengeMode() !== "normal") {
+    state.turbulenceZones.forEach((zone, idx) => {
+      const alpha = 0.03 + Math.sin(state.time * 0.04 + idx) * 0.01;
+      ctx.fillStyle = `rgba(154, 220, 255, ${alpha})`;
+      ctx.fillRect(0, zone.y, state.width, zone.h);
+    });
+  }
+
+  if (state.bossWaveActive) {
+    const pulse = 0.1 + 0.08 * Math.sin(state.time * 0.14);
+    ctx.fillStyle = `rgba(255, 96, 114, ${pulse})`;
+    ctx.fillRect(0, 0, state.width, state.height);
+  }
+}
+
 function randomRange(min, max) {
   return min + Math.random() * (max - min);
 }
@@ -639,11 +877,26 @@ function spawnPole() {
     driftAmp,
     driftSpeed,
     driftPhase,
+    pulsePhase: poleRandomRange(0, Math.PI * 2),
+    oneWayDir: currentChallengeConfig().oneWaySplitters ? (Math.random() < 0.5 ? -1 : 1) : 0,
   });
   state.poleSerial += 1;
 }
 
+function getPoleOpening(pole) {
+  if (!pole) {
+    return 260;
+  }
+  const base = pole.opening;
+  if (currentChallengeMode() === "normal") {
+    return base;
+  }
+  const pulse = 0.85 + Math.sin(state.time * 0.03 + pole.pulsePhase) * 0.14;
+  return clamp(base * pulse, 150, base + 14);
+}
+
 function resetGame() {
+  updateModeSystems();
   state.poleSeed = chooseRunSeed();
   setPoleSeed(state.poleSeed);
   state.balls.length = 0;
@@ -661,6 +914,18 @@ function resetGame() {
   state.lost = false;
   state.survivalTimeSec = 0;
   state.resultRecorded = false;
+  state.streakCount = 0;
+  state.streakTimer = 0;
+  state.massMultiplier = 1;
+  state.hazardTimer = 0;
+  state.hazardCooldown = 540;
+  state.hazardSpeedBoost = 1;
+  state.bossWaveTimer = 0;
+  state.bossWaveActive = false;
+  state.planes.length = 0;
+  state.planeSpawnTimer = randomRange(220, 420);
+  state.racketStrain = 0;
+  state.racketFatigueTimer = 0;
   spawnBall(state.width * 0.5, state.height * 0.48);
   for (let i = 0; i < 3; i += 1) {
     spawnPole();
@@ -789,9 +1054,24 @@ function drawBackground() {
 function drawRacket() {
   const speedX = state.pointerX - state.pointerPrevX;
   const targetAngle = Math.max(-0.46, Math.min(0.46, speedX * 0.045));
-  const angleLerp = 1 - Math.pow(1 - 0.32, state.stepScale);
-  const xLerp = 1 - Math.pow(1 - 0.38, state.stepScale);
-  const yLerp = 1 - Math.pow(1 - 0.18, state.stepScale);
+  const modeCfg = currentChallengeConfig();
+
+  if (Math.abs(targetAngle) > 0.41) {
+    state.racketStrain += 0.95 * state.stepScale;
+  } else {
+    state.racketStrain = Math.max(0, state.racketStrain - 0.55 * state.stepScale);
+  }
+
+  if (state.racketFatigueTimer <= 0 && state.racketStrain >= modeCfg.fatigueThreshold) {
+    state.racketFatigueTimer = 180;
+    state.racketStrain = modeCfg.fatigueThreshold * 0.4;
+  }
+  state.racketFatigueTimer = Math.max(0, state.racketFatigueTimer - state.stepScale);
+
+  const fatigueFactor = state.racketFatigueTimer > 0 ? 0.64 : 1;
+  const angleLerp = (1 - Math.pow(1 - 0.32, state.stepScale)) * fatigueFactor;
+  const xLerp = (1 - Math.pow(1 - 0.38, state.stepScale)) * fatigueFactor;
+  const yLerp = (1 - Math.pow(1 - 0.18, state.stepScale)) * fatigueFactor;
   racket.angle += (targetAngle - racket.angle) * angleLerp;
   racket.x += (state.pointerX - racket.x) * xLerp;
   racket.y += (state.pointerY - racket.y) * yLerp;
@@ -859,8 +1139,9 @@ function drawPoles() {
 }
 
 function drawGoalGate(pole) {
-  const gapTop = pole.gapY - pole.opening * 0.5;
-  const gapBottom = pole.gapY + pole.opening * 0.5;
+  const opening = getPoleOpening(pole);
+  const gapTop = pole.gapY - opening * 0.5;
+  const gapBottom = pole.gapY + opening * 0.5;
   const gateX = pole.x + pole.bodyWidth + 7;
   const glow = 8 + Math.sin(state.time * 0.08 + pole.id) * 2;
 
@@ -893,12 +1174,19 @@ function drawGoalGate(pole) {
     ctx.textAlign = "left";
     ctx.fillText("MASS GATE", gateX + 8, gapTop + 20);
   }
+
+  if (pole.oneWayDir !== 0 && gateX > -80 && gateX < state.width + 40) {
+    ctx.fillStyle = "rgba(255, 240, 208, 0.82)";
+    ctx.font = "700 13px Avenir Next";
+    ctx.textAlign = "left";
+    ctx.fillText(pole.oneWayDir < 0 ? "SPLIT ↓" : "SPLIT ↑", gateX + 8, pole.gapY + (pole.oneWayDir < 0 ? -12 : 16));
+  }
 }
 
 function drawPoleSegment(pole, top) {
   const tipH = 82;
   const centerY = pole.gapY;
-  const openHalf = pole.opening * 0.5;
+  const openHalf = getPoleOpening(pole) * 0.5;
 
   const bodyTop = top ? 0 : centerY + openHalf + tipH;
   const bodyBottom = top ? centerY - openHalf - tipH : state.height;
@@ -1020,7 +1308,10 @@ function drawBalls() {
       for (let i = 0; i < ball.trail.length; i += 1) {
         const t = ball.trail[i];
         const alpha = (i + 1) / ball.trail.length;
-        ctx.fillStyle = `hsla(${ball.hue + 16}, 90%, 66%, ${alpha * 0.08})`;
+        const trailHue = state.trailVariantUnlocked ? ball.hue + 94 : ball.hue + 16;
+        const trailSat = state.trailVariantUnlocked ? 92 : 90;
+        const trailLight = state.trailVariantUnlocked ? 72 : 66;
+        ctx.fillStyle = `hsla(${trailHue}, ${trailSat}%, ${trailLight}%, ${alpha * 0.08})`;
         ctx.beginPath();
         ctx.arc(t.x, t.y, Math.max(1.2, ball.radius * alpha * 0.28), 0, Math.PI * 2);
         ctx.fill();
@@ -1163,9 +1454,12 @@ function drawParticles() {
 
 function updatePoles() {
   const level = currentLevel();
+  const bossBoost = state.bossWaveActive ? 1.35 : 1;
+  const speedFactor = state.hazardSpeedBoost * bossBoost;
+  const scroll = state.scrollSpeed * speedFactor;
 
   state.poles.forEach((pole) => {
-    pole.x -= state.scrollSpeed * state.stepScale;
+    pole.x -= scroll * state.stepScale;
 
     if (!pole.passed && pole.x + pole.bodyWidth < racket.x) {
       pole.passed = true;
@@ -1175,10 +1469,11 @@ function updatePoles() {
 
   state.poles = state.poles.filter((pole) => pole.x + pole.bodyWidth + 80 > 0);
 
-  state.nextPoleAt -= state.scrollSpeed * state.stepScale;
+  state.nextPoleAt -= scroll * state.stepScale;
   if (state.nextPoleAt <= 0) {
     spawnPole();
-    state.nextPoleAt = poleRandomRange(level.poleSpacingMin, level.poleSpacingMax);
+    const spacingScale = state.bossWaveActive ? 0.78 : 1;
+    state.nextPoleAt = poleRandomRange(level.poleSpacingMin * spacingScale, level.poleSpacingMax * spacingScale);
   }
 }
 
@@ -1201,8 +1496,9 @@ function animatePoleDrift() {
 }
 
 function ballIntersectsSpike(ball, pole) {
-  const gapTop = pole.gapY - pole.opening * 0.5;
-  const gapBottom = pole.gapY + pole.opening * 0.5;
+  const opening = getPoleOpening(pole);
+  const gapTop = pole.gapY - opening * 0.5;
+  const gapBottom = pole.gapY + opening * 0.5;
   const tipHeight = 82;
 
   const topTip = {
@@ -1360,6 +1656,15 @@ function updateBalls() {
     ball.vy += state.gravity * state.stepScale;
     // Mild magnus force from spin so angled hits can curve in flight.
     ball.vx += -ball.vy * ball.spin * 0.006 * state.stepScale;
+
+    for (let z = 0; z < state.turbulenceZones.length; z += 1) {
+      const zone = state.turbulenceZones[z];
+      if (ball.y > zone.y && ball.y < zone.y + zone.h) {
+        ball.vx += Math.sin(state.time * 0.18 + ball.x * 0.04 + z) * zone.strength * state.stepScale;
+        ball.vy += Math.cos(state.time * 0.14 + ball.y * 0.05 + z) * zone.strength * 0.7 * state.stepScale;
+      }
+    }
+
     ball.vx *= dragScale;
     ball.vy *= dragScale;
 
@@ -1470,8 +1775,9 @@ function updateBalls() {
 
     state.poles.forEach((pole) => {
       const inXRange = ball.x + ball.radius > pole.x && ball.x - ball.radius < pole.x + pole.bodyWidth;
-      const gapTop = pole.gapY - pole.opening * 0.5;
-      const gapBottom = pole.gapY + pole.opening * 0.5;
+      const opening = getPoleOpening(pole);
+      const gapTop = pole.gapY - opening * 0.5;
+      const gapBottom = pole.gapY + opening * 0.5;
       const tipHeight = 82;
       const topBodyBottom = gapTop - tipHeight;
       const bottomBodyTop = gapBottom + tipHeight;
@@ -1481,12 +1787,26 @@ function updateBalls() {
 
       if (crossedGate && inGateBand && !ball.scoredPoles.has(pole.id)) {
         ball.scoredPoles.add(pole.id);
-        state.massScore += ball.mass;
+        const hazardFactor = state.hazardTimer > 0 ? 1.28 : 1;
+        const massGain = ball.mass * state.massMultiplier * hazardFactor;
+        state.massScore += massGain;
+
+        if (state.streakTimer > 0) {
+          state.streakCount += 1;
+        } else {
+          state.streakCount = 1;
+        }
+        state.streakTimer = 160;
+        if (state.streakCount >= 3) {
+          state.massMultiplier = Math.min(2.65, 1 + (state.streakCount - 2) * 0.2);
+        }
+
         emitParticles(gateX, ball.y, 8, 168);
       }
 
       if (inXRange) {
-        if (ballIntersectsSpike(ball, pole)) {
+        const splitterDirectionOkay = pole.oneWayDir === 0 || Math.sign(ball.vy || 0.001) === pole.oneWayDir;
+        if (ballIntersectsSpike(ball, pole) && splitterDirectionOkay) {
           splitBall(ball);
           return;
         }
@@ -1526,9 +1846,12 @@ function updateHud() {
   }
 
   scoreEl.textContent = `Mass: ${state.massScore.toFixed(1)}`;
+  if (state.massMultiplier > 1.01) {
+    scoreEl.textContent += `  x${state.massMultiplier.toFixed(2)}`;
+  }
   bestEl.textContent = `Best Mass: ${state.best.toFixed(1)}`;
   timeEl.textContent = `Time: ${formatDuration(state.survivalTimeSec)}`;
-  moveModeEl.textContent = `Obstacles: ${state.settings.obstaclesMove ? "Moving" : "Static"}`;
+  moveModeEl.textContent = `Obstacles: ${state.settings.obstaclesMove ? "Moving" : "Static"} • ${currentChallengeConfig().label}`;
   levelEl.textContent = `Level: ${currentLevel().label}`;
   ballsEl.textContent = `Balls: ${state.balls.length}`;
 }
@@ -1551,6 +1874,19 @@ function drawGameOver() {
 }
 
 function updateTip() {
+  tipEl.style.opacity = "1";
+  if (state.bossWaveActive) {
+    tipEl.textContent = `BOSS WAVE: Survive ${(state.bossWaveTimer / 60).toFixed(1)}s for bonus + trail unlock!`;
+    return;
+  }
+  if (state.hazardTimer > 0) {
+    tipEl.textContent = `HAZARD BURST: Pole speed up ${(state.hazardTimer / 60).toFixed(1)}s`;
+    return;
+  }
+  if (state.massMultiplier > 1.01) {
+    tipEl.textContent = `STREAK BONUS ACTIVE x${state.massMultiplier.toFixed(2)}`;
+    return;
+  }
   if (state.time > state.tipFadeAt) {
     tipEl.style.opacity = "0";
   } else {
@@ -1559,12 +1895,13 @@ function updateTip() {
 }
 
 function updateSettingsHint() {
+  const modeLabel = currentChallengeConfig().label;
   if (state.settings.layoutMode === "public-fixed") {
     const setMeta = getCurrentObstacleSet();
-    settingsHintEl.textContent = `Public fixed set: ${setMeta.label} (seed ${setMeta.seed}). Same obstacle positions for all players.`;
+    settingsHintEl.textContent = `Mode: ${modeLabel}. Public fixed set: ${setMeta.label} (seed ${setMeta.seed}). Same obstacle positions for all players.`;
     obstacleSetSelectEl.disabled = false;
   } else {
-    settingsHintEl.textContent = "Development randomized mode uses a fresh obstacle seed each run.";
+    settingsHintEl.textContent = `Mode: ${modeLabel}. Development randomized mode uses a fresh obstacle seed each run.`;
     obstacleSetSelectEl.disabled = true;
   }
 }
@@ -1581,6 +1918,7 @@ function syncSettingsUI() {
   moveObstaclesToggleEl.checked = state.settings.obstaclesMove;
   layoutModeSelectEl.value = state.settings.layoutMode;
   obstacleSetSelectEl.value = state.settings.obstacleSetId;
+  challengeModeSelectEl.value = currentChallengeMode();
   updateSettingsHint();
 }
 
@@ -1588,8 +1926,10 @@ function applySettingsFromUI() {
   state.settings.obstaclesMove = moveObstaclesToggleEl.checked;
   state.settings.layoutMode = layoutModeSelectEl.value === "dev-random" ? "dev-random" : "public-fixed";
   state.settings.obstacleSetId = OBSTACLE_DATABASE[obstacleSetSelectEl.value] ? obstacleSetSelectEl.value : "season-1";
+  state.settings.challengeMode = CHALLENGE_MODES[challengeModeSelectEl.value] ? challengeModeSelectEl.value : "normal";
   saveSettings(state.settings);
   syncSettingsUI();
+  void loadRemoteScoreboardIfAvailable();
   resetGame();
 }
 
@@ -1615,9 +1955,18 @@ function tick(ts = 0) {
   state.lastTs = ts;
 
   state.time += state.stepScale;
+  state.streakTimer = Math.max(0, state.streakTimer - state.stepScale);
+  if (state.streakTimer <= 0) {
+    state.streakCount = 0;
+    state.massMultiplier += (1 - state.massMultiplier) * 0.09;
+  }
+
+  updateHazardsAndBoss();
+  updatePlanes();
   animatePoleDrift();
 
   drawBackground();
+  drawChallengeOverlays();
 
   if (!state.lost) {
     state.survivalTimeSec += dt / 1000;
@@ -1636,6 +1985,7 @@ function tick(ts = 0) {
   updateHud();
 
   drawPoles();
+  drawPlanes();
   drawParticles();
   drawRacket();
   drawBalls();
@@ -1708,6 +2058,11 @@ obstacleSetSelectEl.addEventListener("change", () => {
   updateSettingsHint();
 });
 
+challengeModeSelectEl.addEventListener("change", () => {
+  state.settings.challengeMode = CHALLENGE_MODES[challengeModeSelectEl.value] ? challengeModeSelectEl.value : "normal";
+  updateSettingsHint();
+});
+
 applySettingsBtn.addEventListener("click", () => {
   applySettingsFromUI();
   setSettingsPanelOpen(false);
@@ -1722,10 +2077,14 @@ if (urlParams.get("layout") === "public-fixed" || urlParams.get("layout") === "d
   state.settings.layoutMode = urlParams.get("layout");
 }
 
+if (CHALLENGE_MODES[urlParams.get("mode")]) {
+  state.settings.challengeMode = urlParams.get("mode");
+}
+
 scoreEl.textContent = "Mass: 0.0";
 bestEl.textContent = `Best Mass: ${state.best.toFixed(1)}`;
 timeEl.textContent = "Time: 0.0s";
-moveModeEl.textContent = `Obstacles: ${state.settings.obstaclesMove ? "Moving" : "Static"}`;
+moveModeEl.textContent = `Obstacles: ${state.settings.obstaclesMove ? "Moving" : "Static"} • ${currentChallengeConfig().label}`;
 levelEl.textContent = "Level: 1";
 
 async function bootGame() {
