@@ -6,6 +6,7 @@ const sqlite3 = require("sqlite3").verbose();
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
 const SCORE_TIME_WEIGHT = 2.5;
+const STATIC_NO_CACHE_EXTENSIONS = new Set([".html", ".js", ".css", ".svg"]);
 
 const dataDir = path.join(__dirname, "data");
 const dbPath = path.join(dataDir, "racket_drift.db");
@@ -92,6 +93,14 @@ async function initDb() {
 }
 
 app.use(express.json({ limit: "64kb" }));
+app.disable("etag");
+
+function setNoCacheHeaders(res) {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+  res.set("Surrogate-Control", "no-store");
+}
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
@@ -177,9 +186,17 @@ app.post("/api/scores", async (req, res) => {
   }
 });
 
-app.use(express.static(__dirname));
+app.use(express.static(__dirname, {
+  setHeaders(res, filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (STATIC_NO_CACHE_EXTENSIONS.has(ext)) {
+      setNoCacheHeaders(res);
+    }
+  },
+}));
 
 app.get("*", (_req, res) => {
+  setNoCacheHeaders(res);
   res.sendFile(path.join(__dirname, "index.html"));
 });
 

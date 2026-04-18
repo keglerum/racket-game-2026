@@ -71,6 +71,9 @@ const SCORE_TIME_WEIGHT = 2.5;
 const MIN_BALL_RADIUS = 5;
 const BALL_GROW_DELAY_STEPS = 130;
 const BALL_GROW_RATE = 0.012;
+const BALL_SCREEN_Z_MAX = 18;
+const BALL_BACK_WALL_Z_MIN = -9.5;
+const BALL_TOP_SURFACE_Y = 36;
 const CHALLENGE_MODES = {
   normal: { label: "Normal", turbulenceBands: 0, fatigueThreshold: 999, oneWaySplitters: false, planeWind: false },
   hard: { label: "Hard", turbulenceBands: 1, fatigueThreshold: 34, oneWaySplitters: true, planeWind: true },
@@ -488,6 +491,11 @@ const racket = {
 let audioCtx = null;
 let musicStarted = false;
 let musicStepTimer = null;
+let musicBassGain = null;
+let musicDangerGain = null;
+let musicDangerOsc = null;
+let musicDangerPulse = null;
+const audioBucketLastAt = new Map();
 
 function ensureAudioContext() {
   if (audioCtx) {
@@ -512,6 +520,24 @@ function unlockAudio() {
   startBackgroundMusic();
 }
 
+function canPlaySound(bucket, minGapSec) {
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef || ctxRef.state !== "running") {
+    return false;
+  }
+
+  const now = ctxRef.currentTime;
+  const crowdPenalty = Math.max(0, state.balls.length - 1) * 0.014;
+  const effectiveGap = minGapSec + crowdPenalty;
+  const lastAt = audioBucketLastAt.get(bucket) ?? -Infinity;
+  if (now - lastAt < effectiveGap) {
+    return false;
+  }
+
+  audioBucketLastAt.set(bucket, now);
+  return true;
+}
+
 function startBackgroundMusic() {
   if (musicStarted) {
     return;
@@ -526,12 +552,35 @@ function startBackgroundMusic() {
   const bassGain = ctxRef.createGain();
   bassGain.gain.value = 0.02;
   bassGain.connect(ctxRef.destination);
+  musicBassGain = bassGain;
 
   const bassOsc = ctxRef.createOscillator();
   bassOsc.type = "sine";
   bassOsc.frequency.value = 73.42;
   bassOsc.connect(bassGain);
   bassOsc.start();
+
+  const dangerGain = ctxRef.createGain();
+  dangerGain.gain.value = 0.0001;
+  dangerGain.connect(ctxRef.destination);
+  musicDangerGain = dangerGain;
+
+  const dangerOsc = ctxRef.createOscillator();
+  dangerOsc.type = "sawtooth";
+  dangerOsc.frequency.value = 98;
+  dangerOsc.connect(dangerGain);
+  dangerOsc.start();
+  musicDangerOsc = dangerOsc;
+
+  const dangerPulse = ctxRef.createOscillator();
+  const dangerPulseGain = ctxRef.createGain();
+  dangerPulse.type = "sine";
+  dangerPulse.frequency.value = 4.8;
+  dangerPulseGain.gain.value = 0.009;
+  dangerPulse.connect(dangerPulseGain);
+  dangerPulseGain.connect(dangerGain.gain);
+  dangerPulse.start();
+  musicDangerPulse = dangerPulse;
 
   const pattern = [0, 3, 7, 10, 7, 3, 12, 10];
   let step = 0;
@@ -557,6 +606,72 @@ function startBackgroundMusic() {
 
     step += 1;
   }, 280);
+}
+
+function getDangerLevel() {
+  if (state.lost || state.balls.length === 0) {
+    return 0;
+  }
+
+  let danger = state.balls.length === 1 ? 0.3 : 0.08;
+
+  state.balls.forEach((ball) => {
+    if (ball.y > racket.y + 34) {
+      danger = Math.max(danger, 0.55);
+    }
+
+    if (Math.abs(ball.vy) > 10.5 || Math.abs(ball.vx) > 8.5) {
+      danger = Math.max(danger, 0.44);
+    }
+
+    state.poles.forEach((pole) => {
+      const opening = getPoleOpening(pole);
+      const gapTop = pole.gapY - opening * 0.5;
+      const gapBottom = pole.gapY + opening * 0.5;
+      const poleCenterX = pole.x + pole.bodyWidth * 0.5;
+      const xDistance = Math.abs(ball.x - poleCenterX);
+      if (xDistance > 170) {
+        return;
+      }
+
+      const approach = 1 - clamp(xDistance / 170, 0, 1);
+      const clearance = Math.min(ball.y - gapTop, gapBottom - ball.y) - ball.radius;
+      const clearanceRisk = 1 - clamp((clearance + 18) / 110, 0, 1);
+      danger = Math.max(danger, approach * (0.3 + clearanceRisk * 0.7));
+    });
+  });
+
+  if (state.hazardTimer > 0) {
+    danger = Math.max(danger, 0.58);
+  }
+  if (state.bossWaveActive) {
+    danger = Math.max(danger, 0.72);
+  }
+
+  return clamp(danger, 0, 1);
+}
+
+function updateAdaptiveAudio() {
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef || ctxRef.state !== "running" || !musicStarted) {
+    return;
+  }
+
+  const danger = getDangerLevel();
+  const now = ctxRef.currentTime;
+
+  if (musicBassGain) {
+    musicBassGain.gain.setTargetAtTime(0.016 + danger * 0.012, now, 0.18);
+  }
+  if (musicDangerGain) {
+    musicDangerGain.gain.setTargetAtTime(0.0001 + danger * 0.045, now, 0.09);
+  }
+  if (musicDangerOsc) {
+    musicDangerOsc.frequency.setTargetAtTime(92 + danger * 54, now, 0.12);
+  }
+  if (musicDangerPulse) {
+    musicDangerPulse.frequency.setTargetAtTime(3.4 + danger * 4.8, now, 0.12);
+  }
 }
 
 function playBonk(strength = 1) {
@@ -590,6 +705,88 @@ function playBonk(strength = 1) {
   noise.start(now);
   osc.stop(now + 0.2);
   noise.stop(now + 0.12);
+}
+
+function playWindowBonk(strength = 1) {
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef || ctxRef.state !== "running") {
+    return;
+  }
+
+  const now = ctxRef.currentTime;
+  const tone = ctxRef.createOscillator();
+  const glass = ctxRef.createOscillator();
+  const click = ctxRef.createOscillator();
+  const gain = ctxRef.createGain();
+
+  tone.type = "triangle";
+  tone.frequency.setValueAtTime(210 + strength * 55, now);
+  tone.frequency.exponentialRampToValueAtTime(86, now + 0.16);
+
+  glass.type = "sine";
+  glass.frequency.setValueAtTime(1180 + strength * 220, now);
+  glass.frequency.exponentialRampToValueAtTime(420, now + 0.11);
+
+  click.type = "square";
+  click.frequency.setValueAtTime(780 + strength * 80, now);
+  click.frequency.exponentialRampToValueAtTime(240, now + 0.045);
+
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.19 * strength, now + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+
+  tone.connect(gain);
+  glass.connect(gain);
+  click.connect(gain);
+  gain.connect(ctxRef.destination);
+
+  tone.start(now);
+  glass.start(now);
+  click.start(now);
+  tone.stop(now + 0.21);
+  glass.stop(now + 0.12);
+  click.stop(now + 0.05);
+}
+
+function playConcreteBonk(strength = 1) {
+  const ctxRef = ensureAudioContext();
+  if (!ctxRef || ctxRef.state !== "running") {
+    return;
+  }
+
+  const now = ctxRef.currentTime;
+  const thud = ctxRef.createOscillator();
+  const grit = ctxRef.createOscillator();
+  const slap = ctxRef.createOscillator();
+  const gain = ctxRef.createGain();
+
+  thud.type = "sine";
+  thud.frequency.setValueAtTime(128 + strength * 42, now);
+  thud.frequency.exponentialRampToValueAtTime(52, now + 0.18);
+
+  grit.type = "sawtooth";
+  grit.frequency.setValueAtTime(280 + strength * 60, now);
+  grit.frequency.exponentialRampToValueAtTime(118, now + 0.13);
+
+  slap.type = "triangle";
+  slap.frequency.setValueAtTime(420 + strength * 90, now);
+  slap.frequency.exponentialRampToValueAtTime(148, now + 0.08);
+
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.17 * strength, now + 0.006);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+
+  thud.connect(gain);
+  grit.connect(gain);
+  slap.connect(gain);
+  gain.connect(ctxRef.destination);
+
+  thud.start(now);
+  grit.start(now);
+  slap.start(now);
+  thud.stop(now + 0.23);
+  grit.stop(now + 0.14);
+  slap.stop(now + 0.09);
 }
 
 function playPlaneWhoosh(pan = 0, speed = 1) {
@@ -813,7 +1010,7 @@ function refreshLevelFromMass() {
 function spawnBall(x, y, vx = 0, vy = -2.2, radius = 12, splitCooldown = 10) {
   const hue = Math.floor(randomRange(70, 88));
   const mass = Math.PI * radius * radius * 0.026;
-  const targetRadius = Math.min(12, radius * 1.45);
+  const targetRadius = Number.POSITIVE_INFINITY;
   state.balls.push({
     x,
     y,
@@ -836,8 +1033,48 @@ function spawnBall(x, y, vx = 0, vy = -2.2, radius = 12, splitCooldown = 10) {
     growthTimer: 0,
     targetRadius,
     minFxCooldown: randomRange(8, 18),
+    bounceAnim: 0,
+    bounceType: "none",
+    bounceGlow: 0,
+    laneX: x,
     scoredPoles: new Set(),
   });
+}
+
+function setBallRadius(ball, nextRadius) {
+  ball.radius = nextRadius;
+  ball.area = Math.PI * nextRadius * nextRadius;
+  ball.mass = ball.area * 0.026;
+}
+
+function growBall(ball, deltaRadius, bounceType = "surface") {
+  if (!(deltaRadius > 0)) {
+    return;
+  }
+
+  setBallRadius(ball, ball.radius + deltaRadius);
+  ball.bounceType = bounceType;
+  ball.bounceAnim = Math.max(ball.bounceAnim, 0.28 + deltaRadius * 1.35);
+  ball.bounceGlow = Math.max(ball.bounceGlow, 0.18 + deltaRadius * 0.45);
+}
+
+function triggerDepthImpact(ball, type, impact) {
+  ball.bounceAnim = type === "window" ? 1.18 : 0.92;
+  ball.bounceGlow = clamp(impact * (type === "window" ? 0.22 : 0.18), 0.2, 1.1);
+  ball.bounceType = type;
+
+  if (type === "window") {
+    if (canPlaySound("window-bonk", 0.12)) {
+      playWindowBonk(clamp(impact * 0.22, 0.95, 1.45));
+    }
+    emitParticles(ball.x, ball.y + BALL_SCREEN_Z_MAX * 0.5, 8, 196);
+    return;
+  }
+
+  if (canPlaySound("depth-concrete-bonk", 0.11)) {
+    playConcreteBonk(clamp(impact * 0.2, 0.85, 1.3));
+  }
+  emitParticles(ball.x, ball.y - 8, 6, 32);
 }
 
 function spawnPole() {
@@ -1244,19 +1481,28 @@ function drawPoleSegment(pole, top) {
 
 function drawBalls() {
   state.balls.forEach((ball) => {
-    const renderScale = 1 + ball.z * 0.075;
+    const depthScale = ball.z >= 0 ? 1 + ball.z * 0.09 : 1 + ball.z * 0.038;
+    const bouncePulse = Math.max(0, ball.bounceAnim);
+    const faceLunge = ball.bounceType === "window" ? bouncePulse * 0.6 : 0;
+    const concretePulse = ball.bounceType === "concrete" ? bouncePulse * 0.28 : 0;
+    const renderScale = Math.max(0.58, depthScale + faceLunge + concretePulse);
+    const squashX = 1 + bouncePulse * (ball.bounceType === "window" ? 0.34 : 0.16);
+    const squashY = 1 - bouncePulse * (ball.bounceType === "window" ? 0.2 : 0.1);
     const renderRadius = ball.radius * renderScale;
     const renderY = ball.y + ball.z * 0.55;
     const minPulse = 0.5 + 0.5 * Math.sin(state.time * 0.2 + ball.x * 0.03);
     const isAtMin = ball.radius <= MIN_BALL_RADIUS + 0.06;
 
     if (state.lowPerfMode) {
+      ctx.save();
+      ctx.translate(ball.x, renderY);
+      ctx.scale(squashX, squashY);
       const simpleGlow = ctx.createRadialGradient(
-        ball.x - renderRadius * 0.24,
-        renderY - renderRadius * 0.28,
+        -renderRadius * 0.24,
+        -renderRadius * 0.28,
         renderRadius * 0.22,
-        ball.x,
-        renderY,
+        0,
+        0,
         renderRadius * 1.2,
       );
       simpleGlow.addColorStop(0, `hsla(${ball.hue - 4}, 94%, 72%, 0.98)`);
@@ -1264,20 +1510,18 @@ function drawBalls() {
       simpleGlow.addColorStop(1, `hsla(${ball.hue + 4}, 80%, 40%, 0.22)`);
       ctx.fillStyle = simpleGlow;
       ctx.beginPath();
-      ctx.arc(ball.x, renderY, renderRadius, 0, Math.PI * 2);
+      ctx.arc(0, 0, renderRadius, 0, Math.PI * 2);
       ctx.fill();
 
       if (isAtMin) {
         ctx.strokeStyle = `rgba(170, 255, 227, ${0.28 + minPulse * 0.3})`;
         ctx.lineWidth = Math.max(0.8, renderRadius * 0.12);
         ctx.beginPath();
-        ctx.arc(ball.x, renderY, renderRadius * (1.18 + minPulse * 0.08), 0, Math.PI * 2);
+        ctx.arc(0, 0, renderRadius * (1.18 + minPulse * 0.08), 0, Math.PI * 2);
         ctx.stroke();
       }
 
       const seamTilt = ball.spinAngle + Math.atan2(ball.vy, ball.vx) * 0.1;
-      ctx.save();
-      ctx.translate(ball.x, renderY);
       ctx.rotate(seamTilt);
 
       ctx.strokeStyle = "rgba(16, 20, 15, 0.74)";
@@ -1318,12 +1562,15 @@ function drawBalls() {
       }
     }
 
+    ctx.save();
+    ctx.translate(ball.x, renderY);
+    ctx.scale(squashX, squashY);
     const glow = ctx.createRadialGradient(
-      ball.x - renderRadius * 0.3,
-      renderY - renderRadius * 0.36,
+      -renderRadius * 0.3,
+      -renderRadius * 0.36,
       renderRadius * 0.18,
-      ball.x,
-      renderY,
+      0,
+      0,
       renderRadius * 1.55,
     );
     glow.addColorStop(0, `hsla(${ball.hue - 5}, 96%, 74%, 0.98)`);
@@ -1332,26 +1579,35 @@ function drawBalls() {
     ctx.fillStyle = glow;
 
     ctx.beginPath();
-    ctx.arc(ball.x, renderY, renderRadius * 1.25, 0, Math.PI * 2);
+    ctx.arc(0, 0, renderRadius * 1.25, 0, Math.PI * 2);
     ctx.fill();
+
+    if (bouncePulse > 0.02) {
+      ctx.strokeStyle =
+        ball.bounceType === "window"
+          ? `rgba(214, 246, 255, ${0.16 + ball.bounceGlow * 0.26})`
+          : `rgba(255, 220, 188, ${0.12 + ball.bounceGlow * 0.2})`;
+      ctx.lineWidth = Math.max(1.4, renderRadius * 0.08);
+      ctx.beginPath();
+      ctx.arc(0, 0, renderRadius * (1.36 + bouncePulse * 0.2), 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
     if (isAtMin) {
       ctx.strokeStyle = `rgba(154, 255, 226, ${0.3 + minPulse * 0.34})`;
       ctx.lineWidth = Math.max(1, renderRadius * 0.13);
       ctx.beginPath();
-      ctx.arc(ball.x, renderY, renderRadius * (1.22 + minPulse * 0.12), 0, Math.PI * 2);
+      ctx.arc(0, 0, renderRadius * (1.22 + minPulse * 0.12), 0, Math.PI * 2);
       ctx.stroke();
     }
 
     ctx.fillStyle = "rgba(250, 255, 214, 0.62)";
     ctx.beginPath();
-    ctx.arc(ball.x - renderRadius * 0.28, renderY - renderRadius * 0.32, renderRadius * 0.3, 0, Math.PI * 2);
+    ctx.arc(-renderRadius * 0.28, -renderRadius * 0.32, renderRadius * 0.3, 0, Math.PI * 2);
     ctx.fill();
 
     // Draw classic tennis seams clipped to the sphere for a realistic look.
     const seamTilt = ball.spinAngle + Math.atan2(ball.vy, ball.vx) * 0.1;
-    ctx.save();
-    ctx.translate(ball.x, renderY);
     ctx.rotate(seamTilt);
     ctx.beginPath();
     ctx.arc(0, 0, renderRadius * 1.26, 0, Math.PI * 2);
@@ -1615,10 +1871,16 @@ function splitBall(ball) {
   emitParticles(ball.x, ball.y, 22, ball.hue + 8);
 
   const newRadius = Math.max(MIN_BALL_RADIUS, ball.radius * 0.72);
-  const speed = Math.hypot(ball.vx, ball.vy) + 0.8;
+  const childCount = ball.radius > 18 ? 3 : 2;
+  const baseSpeed = Math.hypot(ball.vx, ball.vy) + 0.8;
+  const spawnOffsets = childCount === 3 ? [-8, 0, 8] : [-6, 6];
 
-  spawnBall(ball.x - 4, ball.y, -Math.abs(speed * 0.52), -2.5, newRadius, 14);
-  spawnBall(ball.x + 4, ball.y, Math.abs(speed * 0.52), -2.5, newRadius, 14);
+  spawnOffsets.forEach((offset, index) => {
+    const spread = childCount === 3 ? index - 1 : index === 0 ? -0.5 : 0.5;
+    const childVx = ball.vx * 0.35 + spread * baseSpeed * 0.58;
+    const childVy = ball.vy * 0.88 - 0.6;
+    spawnBall(ball.x + offset, ball.y, childVx, childVy, newRadius, 16);
+  });
 }
 
 function worldToRacketLocal(x, y) {
@@ -1647,6 +1909,11 @@ function updateBalls() {
     ball.splitCooldown = Math.max(0, ball.splitCooldown - state.stepScale);
     ball.bonkCooldown = Math.max(0, ball.bonkCooldown - state.stepScale);
     ball.minFxCooldown = Math.max(0, ball.minFxCooldown - state.stepScale);
+    ball.bounceAnim = Math.max(0, ball.bounceAnim - 0.08 * state.stepScale);
+    ball.bounceGlow = Math.max(0, ball.bounceGlow - 0.06 * state.stepScale);
+    if (ball.bounceAnim <= 0.02) {
+      ball.bounceType = "none";
+    }
     ball.prevX = ball.x;
     ball.prevY = ball.y;
 
@@ -1654,14 +1921,13 @@ function updateBalls() {
     ball.spinAngle += ball.spin * state.stepScale;
 
     ball.vy += state.gravity * state.stepScale;
-    // Mild magnus force from spin so angled hits can curve in flight.
     ball.vx += -ball.vy * ball.spin * 0.006 * state.stepScale;
 
-    for (let z = 0; z < state.turbulenceZones.length; z += 1) {
-      const zone = state.turbulenceZones[z];
+    for (let zoneIndex = 0; zoneIndex < state.turbulenceZones.length; zoneIndex += 1) {
+      const zone = state.turbulenceZones[zoneIndex];
       if (ball.y > zone.y && ball.y < zone.y + zone.h) {
-        ball.vx += Math.sin(state.time * 0.18 + ball.x * 0.04 + z) * zone.strength * state.stepScale;
-        ball.vy += Math.cos(state.time * 0.14 + ball.y * 0.05 + z) * zone.strength * 0.7 * state.stepScale;
+        ball.vx += Math.sin(state.time * 0.18 + ball.x * 0.04 + zoneIndex) * zone.strength * state.stepScale;
+        ball.vy += Math.cos(state.time * 0.14 + ball.y * 0.05 + zoneIndex) * zone.strength * 0.7 * state.stepScale;
       }
     }
 
@@ -1674,19 +1940,6 @@ function updateBalls() {
     ball.trail.push({ x: ball.x, y: ball.y });
     if (ball.trail.length > 8) {
       ball.trail.shift();
-    }
-
-    const hasRoomToGrow = ball.radius < ball.targetRadius - 1e-3;
-    if (hasRoomToGrow) {
-      ball.growthTimer += state.stepScale;
-      if (ball.growthTimer >= BALL_GROW_DELAY_STEPS) {
-        const nextRadius = Math.min(ball.targetRadius, ball.radius + BALL_GROW_RATE * state.stepScale);
-        if (nextRadius !== ball.radius) {
-          ball.radius = nextRadius;
-          ball.area = Math.PI * ball.radius * ball.radius;
-          ball.mass = ball.area * 0.026;
-        }
-      }
     }
 
     if (ball.radius <= MIN_BALL_RADIUS + 0.06 && ball.minFxCooldown <= 0) {
@@ -1733,47 +1986,81 @@ function updateBalls() {
       const edgeRatio = hitLocalX / (racket.width * 0.5);
       const mouseSteer = clamp((state.pointerX - state.pointerPrevX) * 0.12, -2.1, 2.1);
       const desiredVX = Math.sin(racket.angle) * 7.2 + edgeRatio * 4.2 + mouseSteer;
-      const impulse = Math.max(7.8, 9.9 - Math.abs(hitLocalX) * 0.014);
+      const impulse = Math.max(8.1, 10.1 - Math.abs(hitLocalX) * 0.014);
 
       ball.vx = ball.vx * 0.28 + desiredVX * 0.72;
       if (Math.abs(edgeRatio) < 0.18 && Math.abs(racket.angle) < 0.08) {
         ball.vx *= 0.74;
       }
-      ball.vx = clamp(ball.vx, -10, 10);
+      ball.vx = clamp(ball.vx, -10.2, 10.2);
       ball.vy = -impulse;
       ball.y -= 4;
 
       const spinKick = clamp(edgeRatio * 0.35 + racket.angle * 0.75 + mouseSteer * 0.08, -0.75, 0.75);
       ball.spin += spinKick;
 
-      if (Math.random() < 0.58) {
-        const towardScreen = (2.3 + Math.abs(edgeRatio) * 2.2 + Math.abs(mouseSteer) * 0.28) * randomRange(0.9, 1.35);
+      const faceBounceChance = Math.abs(edgeRatio) < 0.42 ? 0.26 : 0.16;
+      const concreteBounceChance = 0.14;
+      const depthRoll = Math.random();
+      if (depthRoll < faceBounceChance) {
+        const towardScreen = (3.8 + Math.abs(edgeRatio) * 2.4 + Math.abs(mouseSteer) * 0.32) * randomRange(0.96, 1.28);
         ball.vz += towardScreen;
+      } else if (depthRoll < faceBounceChance + concreteBounceChance) {
+        const awayFromScreen = (2.9 + Math.abs(edgeRatio) * 1.2 + Math.abs(ball.vx) * 0.1) * randomRange(0.92, 1.18);
+        ball.vz -= awayFromScreen;
+      }
+
+      growBall(ball, 0.12 + Math.abs(ball.vy) * 0.006, "surface");
+      if (canPlaySound("racket-bonk", 0.045)) {
+        playBonk(clamp(0.82 + Math.abs(ball.vy) * 0.035, 0.82, 1.2));
       }
 
       emitParticles(ball.x, ball.y + 5, 3, ball.hue);
     }
 
+    if (ball.y - ball.radius <= BALL_TOP_SURFACE_Y) {
+      const impact = Math.abs(ball.vy);
+      ball.y = BALL_TOP_SURFACE_Y + ball.radius;
+      ball.vy = Math.max(4.8, impact * 0.94);
+      ball.vx *= 0.985;
+      ball.spin += clamp(ball.vx * 0.01, -0.18, 0.18);
+      growBall(ball, 0.08 + impact * 0.004, "surface");
+      if (canPlaySound("ceiling-bonk", 0.07)) {
+        playConcreteBonk(clamp(0.78 + impact * 0.03, 0.78, 1.16));
+      }
+      emitParticles(ball.x, ball.y - ball.radius, 4, 34);
+    }
+
     ball.vz *= zDamping;
     ball.z += ball.vz * state.stepScale;
-    const zMax = 14.5;
-    if (ball.z > zMax) {
+    if (ball.z > BALL_SCREEN_Z_MAX) {
       const impact = Math.abs(ball.vz);
-      ball.z = zMax;
+      ball.z = BALL_SCREEN_Z_MAX;
       if (ball.vz > 0) {
-        ball.vz = -Math.abs(ball.vz) * 0.7;
+        ball.vz = -Math.abs(ball.vz) * 0.74;
       }
       if (ball.bonkCooldown <= 0) {
-        ball.bonkCooldown = 22;
-        playBonk(clamp(impact * 0.24, 0.8, 1.35));
+        ball.bonkCooldown = 18;
+        triggerDepthImpact(ball, "window", impact);
       }
     }
-    if (ball.z < 0) {
-      ball.z = 0;
-      ball.vz = Math.max(0, ball.vz);
+    if (ball.z < BALL_BACK_WALL_Z_MIN) {
+      const impact = Math.abs(ball.vz);
+      ball.z = BALL_BACK_WALL_Z_MIN;
+      if (ball.vz < 0) {
+        ball.vz = Math.abs(ball.vz) * 0.68;
+      }
+      if (ball.bonkCooldown <= 0) {
+        ball.bonkCooldown = 14;
+        triggerDepthImpact(ball, "concrete", impact);
+      }
     }
 
     state.poles.forEach((pole) => {
+      if (!ball.alive) {
+        return;
+      }
+
       const inXRange = ball.x + ball.radius > pole.x && ball.x - ball.radius < pole.x + pole.bodyWidth;
       const opening = getPoleOpening(pole);
       const gapTop = pole.gapY - opening * 0.5;
@@ -1787,9 +2074,6 @@ function updateBalls() {
 
       if (crossedGate && inGateBand && !ball.scoredPoles.has(pole.id)) {
         ball.scoredPoles.add(pole.id);
-        const hazardFactor = state.hazardTimer > 0 ? 1.28 : 1;
-        const massGain = ball.mass * state.massMultiplier * hazardFactor;
-        state.massScore += massGain;
 
         if (state.streakTimer > 0) {
           state.streakCount += 1;
@@ -1808,6 +2092,9 @@ function updateBalls() {
         const splitterDirectionOkay = pole.oneWayDir === 0 || Math.sign(ball.vy || 0.001) === pole.oneWayDir;
         if (ballIntersectsSpike(ball, pole) && splitterDirectionOkay) {
           splitBall(ball);
+          if (canPlaySound("split-hit", 0.095)) {
+            playConcreteBonk(1.12);
+          }
           return;
         }
 
@@ -1822,7 +2109,11 @@ function updateBalls() {
         );
 
         if (hitTopBody || hitBottomBody) {
-          emitParticles(ball.x, ball.y, 2, ball.hue);
+          ball.spin += clamp(ball.vx * 0.02, -0.2, 0.2);
+          if (canPlaySound("body-hit", 0.09)) {
+            playConcreteBonk(1.08);
+          }
+          emitParticles(ball.x, ball.y, 6, ball.hue + 6);
         }
       }
     });
@@ -1833,6 +2124,7 @@ function updateBalls() {
   });
 
   state.balls = state.balls.filter((ball) => ball.alive);
+  state.massScore = state.balls.reduce((sum, ball) => sum + ball.mass, 0);
 
   if (state.balls.length === 0) {
     state.lost = true;
@@ -1890,7 +2182,7 @@ function updateTip() {
   if (state.time > state.tipFadeAt) {
     tipEl.style.opacity = "0";
   } else {
-    tipEl.textContent = "Cross the cyan MASS GATE line to score mass.";
+    tipEl.textContent = "Use angle and mouse speed to shape the rebound. Bigger balls carry more mass, but they are harder to control.";
   }
 }
 
@@ -1964,6 +2256,7 @@ function tick(ts = 0) {
   updateHazardsAndBoss();
   updatePlanes();
   animatePoleDrift();
+  updateAdaptiveAudio();
 
   drawBackground();
   drawChallengeOverlays();
